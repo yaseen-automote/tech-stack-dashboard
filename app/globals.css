@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", "Cascadia Code", "Roboto Mono", ui-monospace, monospace;
+  --radius: 8px;
+
+  --neutral-50: #fafafa;
+  --neutral-100: #f5f5f5;
+  --neutral-200: #e5e5e5;
+  --neutral-300: #d4d4d4;
+  --neutral-400: #a3a3a3;
+  --neutral-500: #737373;
+  --neutral-600: #525252;
+  --neutral-700: #404040;
+  --neutral-800: #262626;
+  --neutral-900: #171717;
+  --neutral-950: #0a0a0a;
+
+  --background: var(--neutral-950);
+  --foreground: var(--neutral-50);
+  --surface: var(--neutral-900);
+  --surface-subtle: #1f1f1f;
+  --surface-raised: var(--neutral-800);
+  --sidebar: var(--neutral-900);
+  --sidebar-elevated: #232323;
+  --sidebar-border: var(--neutral-800);
+  --sidebar-accent: #16b4d8;
+  --muted: #111111;
+  --muted-foreground: var(--neutral-400);
+  --border: var(--neutral-800);
+  --input: var(--neutral-800);
+  --ring: #0070f3;
+  --primary: #0070f3;
+  --primary-foreground: var(--neutral-50);
+  --destructive: #e5484d;
+  --destructive-foreground: var(--neutral-50);
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+html,
+body {
+  min-height: 100%;
+  background: var(--background);
+}
+
+body {
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv11", "ss01";
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  color: var(--foreground);
+}
+
+@layer utilities {
+  .dashboard-grid {
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  }
+
+  @media (min-width: 1536px) {
+    .dashboard-grid {
+      grid-template-columns: minmax(0, 1.5fr) minmax(380px, 0.75fr);
+    }
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .sidebar-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--neutral-600) transparent;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--neutral-600);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+}
