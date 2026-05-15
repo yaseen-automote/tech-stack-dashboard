@@ -297,6 +297,25 @@ describe("ClickHouseBulkTransformRepository", () => {
     expect(query).toContain("WHERE rejection_reason IS NULL");
   });
 
+  it("uses structured ipv6 validation so colon-only strings are rejected", async () => {
+    const client = new MockClickHouseClient();
+    client.queryResponses.push([{ row_count: "0" }]);
+    const repository = new ClickHouseBulkTransformRepository({ client });
+
+    await repository.transformImportIntoServing({
+      loadVersion: "load-2026-04",
+      importVersion: "import-2026-04",
+      snapshotMonth: "2026-04",
+    });
+
+    const query = String(client.commandCalls[0]?.query);
+
+    expect(query).toContain("NOT match(lowerUTF8(ip_address), '^:+$')");
+    expect(query).toContain("NOT match(lowerUTF8(ip_address), ':::')");
+    expect(query).toContain("NOT match(lowerUTF8(ip_address), '::.*::')");
+    expect(query).toContain("length(splitByChar(':', lowerUTF8(ip_address))) = 8");
+  });
+
   it("records transforming, ready, failed, and activation events", async () => {
     const client = new MockClickHouseClient();
     const repository = new ClickHouseBulkTransformRepository({ client });

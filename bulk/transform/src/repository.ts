@@ -101,12 +101,33 @@ function buildIpNormalizationExpression(rawExpression: string) {
 }
 
 function buildIpValidityExpression(ipExpression: string) {
+  const normalizedIpv6Expression = `lowerUTF8(${ipExpression})`;
+  const ipv6SegmentsExpression = `splitByChar(':', ${normalizedIpv6Expression})`;
+  const nonEmptyIpv6SegmentsExpression = `arrayFilter(segment -> length(segment) > 0, ${ipv6SegmentsExpression})`;
+
   return `${ipExpression} IS NOT NULL
       AND (
         match(${ipExpression}, ${sqlString(IPV4_PATTERN)})
         OR (
           position(${ipExpression}, ':') > 0
-          AND match(lowerUTF8(${ipExpression}), ${sqlString("^[0-9a-f:]+$")})
+          AND match(${normalizedIpv6Expression}, ${sqlString("^[0-9a-f:]+$")})
+          AND NOT match(${normalizedIpv6Expression}, ${sqlString("^:+$")})
+          AND NOT match(${normalizedIpv6Expression}, ${sqlString(":::")})
+          AND NOT match(${normalizedIpv6Expression}, ${sqlString("::.*::")})
+          AND length(${nonEmptyIpv6SegmentsExpression}) > 0
+          AND length(${nonEmptyIpv6SegmentsExpression}) <= 8
+          AND length(arrayFilter(segment -> length(segment) > 4, ${nonEmptyIpv6SegmentsExpression})) = 0
+          AND length(arrayFilter(segment -> NOT match(segment, ${sqlString("^[0-9a-f]{1,4}$")}), ${nonEmptyIpv6SegmentsExpression})) = 0
+          AND (
+            (
+              position(${normalizedIpv6Expression}, '::') > 0
+              AND length(${nonEmptyIpv6SegmentsExpression}) < 8
+            )
+            OR (
+              position(${normalizedIpv6Expression}, '::') = 0
+              AND length(${ipv6SegmentsExpression}) = 8
+            )
+          )
         )
       )`;
 }
