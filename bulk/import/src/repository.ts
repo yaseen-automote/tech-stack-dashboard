@@ -169,6 +169,7 @@ export class ClickHouseBulkImportRepository implements BulkImportRepository {
       values: createReadStream(normalizePathForClickHouse(params.parquetPath)),
     });
 
+    execResult.stream.resume();
     await finished(execResult.stream);
 
     const rowCountRows = await readRows<Record<string, unknown>>(
