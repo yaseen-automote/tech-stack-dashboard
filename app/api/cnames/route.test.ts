@@ -18,10 +18,25 @@ describe("GET /api/cnames", () => {
     });
   });
 
-  it("posts the target_domain payload to the upstream API and maps JSON results", async () => {
+  it("proxies valid requests to the bulk cname API and preserves the payload", async () => {
     const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
       Response.json({
-        results: ["www.phrack.org", "phrack.com"],
+        domain: "phrack.org",
+        results: [
+          {
+            id: "www.phrack.org-0",
+            subdomain: "www.phrack.org",
+            type: "CNAME",
+            status: "Live",
+          },
+          {
+            id: "phrack.com-1",
+            subdomain: "phrack.com",
+            type: "CNAME",
+            status: "Live",
+          },
+        ],
+        source: "upstream",
       }),
     );
 
@@ -31,17 +46,12 @@ describe("GET /api/cnames", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [upstreamUrl, init] = fetchSpy.mock.calls[0] ?? [];
 
-    expect(String(upstreamUrl)).toBe("https://ip.thc.org/api/v1/lookup/cnames");
+    expect(String(upstreamUrl)).toBe("http://127.0.0.1:8787/v1/cnames?domain=phrack.org&limit=25");
     expect(init).toMatchObject({
-      method: "POST",
       cache: "no-store",
       headers: {
-        Accept: "application/json, text/plain",
-        "Content-Type": "application/json",
+        Accept: "application/json",
       },
-      body: JSON.stringify({
-        target_domain: "phrack.org",
-      }),
     });
 
     expect(response.status).toBe(200);
@@ -61,6 +71,7 @@ describe("GET /api/cnames", () => {
           status: "Live",
         },
       ],
+      source: "upstream",
     });
   });
 });

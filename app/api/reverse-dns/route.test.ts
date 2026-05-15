@@ -18,10 +18,20 @@ describe("GET /api/reverse-dns", () => {
     });
   });
 
-  it("posts the ip_address payload to the upstream API and maps JSON results", async () => {
+  it("proxies valid requests to the bulk reverse-ip API and preserves the payload", async () => {
     const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
       Response.json({
-        results: ["sea30s10-in-f14.1e100.net", "lga34s40-in-f14.1e100.net"],
+        domain: "142.251.43.46",
+        results: ["sea30s10-in-f14.1e100.net", "lga34s40-in-f14.1e100.net"].map(
+          (subdomain, index) => ({
+            id: `${subdomain}-${index}`,
+            subdomain,
+            type: "Reverse DNS",
+            status: "Live",
+          }),
+        ),
+        snapshotMonth: "2026-04",
+        source: "bulk",
       }),
     );
 
@@ -31,21 +41,12 @@ describe("GET /api/reverse-dns", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [upstreamUrl, init] = fetchSpy.mock.calls[0] ?? [];
 
-    expect(String(upstreamUrl)).toBe("https://ip.thc.org/api/v1/lookup");
+    expect(String(upstreamUrl)).toBe("http://127.0.0.1:8787/v1/reverse-ip?ip=142.251.43.46&limit=10");
     expect(init).toMatchObject({
-      method: "POST",
       cache: "no-store",
       headers: {
-        Accept: "application/json, text/plain",
-        "Content-Type": "application/json",
+        Accept: "application/json",
       },
-      body: JSON.stringify({
-        ip_address: "142.251.43.46",
-        tld: ["com"],
-        apex_domain: "",
-        page_state: "",
-        limit: 10,
-      }),
     });
 
     expect(response.status).toBe(200);
@@ -65,6 +66,8 @@ describe("GET /api/reverse-dns", () => {
           status: "Live",
         },
       ],
+      snapshotMonth: "2026-04",
+      source: "bulk",
     });
   });
 });

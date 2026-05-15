@@ -1,0 +1,83 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.4
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - bulk-private
+
+  bulk-api:
+    build:
+      context: .
+      dockerfile: bulk/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      BULK_SNAPSHOT_STORAGE_PATH: /var/lib/tech-stack-dashboard/bulk-snapshots
+      BULK_ACTIVE_SNAPSHOT_MONTH: ${BULK_ACTIVE_SNAPSHOT_MONTH}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      HONO_HOST: ${HONO_HOST}
+      HONO_PORT: ${HONO_PORT}
+    volumes:
+      - ${BULK_SNAPSHOT_STORAGE_PATH}:/var/lib/tech-stack-dashboard/bulk-snapshots
+    expose:
+      - "${HONO_PORT}"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const port = process.env.HONO_PORT || '8787'; fetch('http://127.0.0.1:' + port + '/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - bulk-private
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    restart: unless-stopped
+    depends_on:
+      bulk-api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      DASHBOARD_BULK_API_BASE_URL: ${DASHBOARD_BULK_API_BASE_URL}
+    ports:
+      - "${DASHBOARD_PORT}:3000"
+    networks:
+      - bulk-private
+      - public-edge
+
+networks:
+  bulk-private:
+    driver: bridge
+    internal: true
+  public-edge:
+    driver: bridge
+volumes:
+  clickhouse-data:

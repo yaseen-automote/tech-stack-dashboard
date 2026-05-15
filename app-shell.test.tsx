@@ -12,7 +12,7 @@ describe("DashboardShell", () => {
 
     expect(screen.getByTestId("dashboard-shell")).toBeInTheDocument();
     expect(screen.getByRole("main")).toBeInTheDocument();
-    expect(screen.getByRole("navigation")).toBeInTheDocument();
+    expect(screen.getAllByRole("navigation").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Subdomain Lookup").length).toBeGreaterThan(0);
     expect(screen.getAllByText("CNAME Lookup").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reverse DNS").length).toBeGreaterThan(0);
@@ -101,7 +101,7 @@ describe("DashboardShell", () => {
 
     render(<DashboardShell />);
 
-    fireEvent.click(screen.getByRole("button", { name: /reverse dns/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /reverse dns/i })[0]);
 
     fireEvent.change(screen.getByRole("searchbox", { name: /search or inspect an ip address/i }), {
       target: { value: "142.251.43.46" },
@@ -148,7 +148,7 @@ describe("DashboardShell", () => {
 
     render(<DashboardShell />);
 
-    fireEvent.click(screen.getByRole("button", { name: /tech stack/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /tech stack/i })[0]);
 
     const websiteInput = screen.getByRole("searchbox", {
       name: /search or inspect a website/i,
