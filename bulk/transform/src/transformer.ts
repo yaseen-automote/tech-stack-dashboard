@@ -17,12 +17,26 @@ export async function transformImportedSnapshot(options: {
   );
 
   if (readyTransform) {
+    if (
+      readyTransform.snapshotMonth !== options.snapshotMonth ||
+      readyTransform.importVersion !== options.importVersion
+    ) {
+      throw new Error(
+        `Ready transform for source key ${options.sourceKey} does not match requested snapshot/import context.`,
+      );
+    }
+
     await options.repository.activateLoad({
       loadVersion: readyTransform.loadVersion,
       snapshotMonth: readyTransform.snapshotMonth,
     });
 
-    return readyTransform;
+    return {
+      loadVersion: readyTransform.loadVersion,
+      sourceKey: readyTransform.sourceKey,
+      snapshotMonth: readyTransform.snapshotMonth,
+      rowCount: readyTransform.rowCount,
+    };
   }
 
   const loadVersion = options.createLoadVersion?.() ?? crypto.randomUUID();

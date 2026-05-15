@@ -4,7 +4,10 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { ClickHouseBulkTransformRepository } from "./src/repository";
+import {
+  ClickHouseBulkTransformRepository,
+  deriveDomainParts,
+} from "./src/repository";
 import { transformImportedSnapshot } from "./src/transformer";
 import type { BulkTransformRepository } from "./src/types";
 
@@ -64,6 +67,7 @@ describe("transformImportedSnapshot", () => {
 
     repository.findReadyTransformBySourceKey.mockResolvedValue({
       loadVersion: "load-2026-04",
+      importVersion: "import-2026-04",
       sourceKey: "2026-04:abc",
       snapshotMonth: "2026-04",
       rowCount: 12,
@@ -91,6 +95,31 @@ describe("transformImportedSnapshot", () => {
       loadVersion: "load-2026-04",
       snapshotMonth: "2026-04",
     });
+  });
+
+  it("fails loudly when a ready transform does not match the requested import context", async () => {
+    const repository = createRepository();
+
+    repository.findReadyTransformBySourceKey.mockResolvedValue({
+      loadVersion: "load-2026-03",
+      importVersion: "import-2026-03",
+      sourceKey: "2026-04:abc",
+      snapshotMonth: "2026-03",
+      rowCount: 12,
+    });
+
+    await expect(
+      transformImportedSnapshot({
+        snapshotMonth: "2026-04",
+        importVersion: "import-2026-04",
+        sourceKey: "2026-04:abc",
+        repository: repository as unknown as BulkTransformRepository,
+        createLoadVersion: () => "load-unused",
+      }),
+    ).rejects.toThrow(/ready transform .* does not match requested snapshot\/import context/i);
+
+    expect(repository.activateLoad).not.toHaveBeenCalled();
+    expect(repository.registerTransformStart).not.toHaveBeenCalled();
   });
 
   it("keeps the active load unchanged when the transform fails", async () => {
@@ -169,6 +198,7 @@ describe("ClickHouseBulkTransformRepository", () => {
     client.queryResponses.push([
       {
         load_version: "load-2026-04",
+        import_version: "import-2026-04",
         source_key: "2026-04:abc",
         snapshot_month: "2026-04",
         row_count: "9",
@@ -178,6 +208,7 @@ describe("ClickHouseBulkTransformRepository", () => {
 
     await expect(repository.findReadyTransformBySourceKey("2026-04:abc")).resolves.toEqual({
       loadVersion: "load-2026-04",
+      importVersion: "import-2026-04",
       sourceKey: "2026-04:abc",
       snapshotMonth: "2026-04",
       rowCount: 9,
@@ -217,6 +248,18 @@ describe("ClickHouseBulkTransformRepository", () => {
       }),
     );
     expect(String(client.commandCalls[0]?.query)).toContain("FROM bulk_hostname_raw");
+    expect(String(client.commandCalls[0]?.query)).toContain(
+      "NULLIF(trim(BOTH ' ' FROM raw_hostname), '')",
+    );
+    expect(String(client.commandCalls[0]?.query)).toContain(
+      "NULLIF(trim(BOTH ' ' FROM raw_ip_address), '')",
+    );
+    expect(String(client.commandCalls[0]?.query)).toContain("match(");
+    expect(String(client.commandCalls[0]?.query)).toContain("WHEN hostname LIKE '%.co.uk'");
+    expect(String(client.commandCalls[0]?.query)).toContain(
+      "NULLIF(trim(BOTH ' ' FROM raw_provider_hint), '') AS provider_hint",
+    );
+    expect(String(client.commandCalls[0]?.query)).not.toContain("lowerUTF8(trim(BOTH ' ' FROM raw_provider_hint))");
     expect(client.queryCalls[0]).toEqual(
       expect.objectContaining({
         query: expect.stringContaining("FROM bulk_hostname_serving"),
@@ -226,6 +269,32 @@ describe("ClickHouseBulkTransformRepository", () => {
         format: "JSONEachRow",
       }),
     );
+  });
+
+  it("preserves multi-label public suffix handling for domains like example.co.uk", () => {
+    expect(deriveDomainParts("api.example.co.uk")).toEqual({
+      apexDomain: "example.co.uk",
+      tld: "co.uk",
+      firstLabel: "api",
+    });
+  });
+
+  it("filters trimmed-empty raw hostname and ip rows after trimming in the transform sql", async () => {
+    const client = new MockClickHouseClient();
+    client.queryResponses.push([{ row_count: "0" }]);
+    const repository = new ClickHouseBulkTransformRepository({ client });
+
+    await repository.transformImportIntoServing({
+      loadVersion: "load-2026-04",
+      importVersion: "import-2026-04",
+      snapshotMonth: "2026-04",
+    });
+
+    const query = String(client.commandCalls[0]?.query);
+
+    expect(query).not.toContain("raw_hostname != ''");
+    expect(query).not.toContain("raw_ip_address != ''");
+    expect(query).toContain("WHERE rejection_reason IS NULL");
   });
 
   it("records transforming, ready, failed, and activation events", async () => {

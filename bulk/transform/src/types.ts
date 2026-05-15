@@ -5,9 +5,13 @@ export type ReadyTransformRecord = {
   rowCount: number;
 };
 
+export type ReadyTransformContextRecord = ReadyTransformRecord & {
+  importVersion: string;
+};
+
 export interface BulkTransformRepository {
   ensureSchema(): Promise<void>;
-  findReadyTransformBySourceKey(sourceKey: string): Promise<ReadyTransformRecord | null>;
+  findReadyTransformBySourceKey(sourceKey: string): Promise<ReadyTransformContextRecord | null>;
   registerTransformStart(params: {
     loadVersion: string;
     importVersion: string;
@@ -20,9 +24,7 @@ export interface BulkTransformRepository {
     snapshotMonth: string;
   }): Promise<number>;
   markTransformReady(
-    params: ReadyTransformRecord & {
-      importVersion: string;
-    },
+    params: ReadyTransformContextRecord,
   ): Promise<void>;
   markTransformFailed(params: {
     loadVersion: string;
