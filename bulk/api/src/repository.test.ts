@@ -196,6 +196,17 @@ describe("ClickHouseBulkApiRepository", () => {
       `,
       values: [
         {
+          load_version: "load-2026-03",
+          snapshot_month: "2026-03",
+          ip_address: "203.0.113.10",
+          hostname: "legacy.example.com",
+          apex_domain: "example.com",
+          tld: "com",
+          first_label: "legacy",
+          cname_target: "old-edge.example.net",
+          provider_hint: "akamai",
+        },
+        {
           load_version: "load-2026-04",
           snapshot_month: "2026-04",
           ip_address: "203.0.113.10",
@@ -207,6 +218,14 @@ describe("ClickHouseBulkApiRepository", () => {
           provider_hint: "cloudflare",
         },
       ],
+    });
+
+    await client.command({
+      query: `
+        INSERT INTO bulk_runtime_state_events
+        (state_key, load_version, snapshot_month, recorded_at)
+        VALUES ('hostname_serving', 'load-2026-03', '2026-03', now64(3))
+      `,
     });
 
     await client.command({
@@ -228,6 +247,10 @@ describe("ClickHouseBulkApiRepository", () => {
         snapshotMonth: "2026-04",
       },
     ]);
+    expect(rows).not.toContainEqual({
+      hostname: "legacy.example.com",
+      snapshotMonth: "2026-03",
+    });
   });
 
   it("queries the active reverse-ip serving view", async () => {
