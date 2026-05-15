@@ -1,5 +1,9 @@
 import type { BulkImportRepository, ImportSnapshotResult } from "./types";
-import { buildSourceKey, readManifest, verifyManifestSource } from "./manifest";
+import {
+  buildSourceKeyFromVerifiedSource,
+  readManifest,
+  verifyManifestSource,
+} from "./manifest";
 
 function formatClickHouseDateTime64(date: Date) {
   const pad = (value: number, width = 2) => String(value).padStart(width, "0");
@@ -21,8 +25,8 @@ export async function importSnapshotToClickHouse(options: {
   const createImportVersion = options.createImportVersion ?? (() => crypto.randomUUID());
   const now = options.now ?? (() => new Date());
   const recordedAt = () => formatClickHouseDateTime64(now());
-  const sourceKey = await buildSourceKey(
-    manifest.source.parquetPath,
+  const sourceKey = buildSourceKeyFromVerifiedSource(
+    source,
     manifest.snapshotMonth,
   );
   const importVersion = createImportVersion();

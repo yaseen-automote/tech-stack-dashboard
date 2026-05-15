@@ -139,12 +139,9 @@ export async function verifyManifestSource(
   };
 }
 
-export async function buildSourceKey(
-  parquetPath: string,
+export function buildSourceKeyFromVerifiedSource(
+  source: VerifiedImportSource,
   snapshotMonth: string,
 ) {
-  const sourceFile = await stat(parquetPath);
-  const sha256 = await hashFileSha256(parquetPath);
-
-  return `${snapshotMonth}:${sha256}:${sourceFile.size}`;
+  return `${snapshotMonth}:${source.checksum.value}:${source.sizeBytes}`;
 }
