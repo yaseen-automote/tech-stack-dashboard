@@ -90,20 +90,21 @@ CREATE TABLE IF NOT EXISTS bulk_transform_attempt_events
   status Enum8('transforming' = 1, 'ready' = 2, 'failed' = 3),
   row_count UInt64 DEFAULT 0,
   error_message Nullable(String),
+  event_id UUID DEFAULT generateUUIDv7(),
   recorded_at DateTime64(3, 'UTC')
 )
 ENGINE = MergeTree
-ORDER BY (source_key, load_version, recorded_at);
+ORDER BY (source_key, load_version, recorded_at, event_id);
 
 CREATE VIEW IF NOT EXISTS bulk_transform_attempts_latest AS
 SELECT
   load_version,
   source_key,
-  argMax(import_version, recorded_at) AS import_version,
-  argMax(snapshot_month, recorded_at) AS snapshot_month,
-  argMax(status, recorded_at) AS status,
-  argMax(row_count, recorded_at) AS row_count,
-  argMax(error_message, recorded_at) AS error_message,
+  argMax(import_version, tuple(recorded_at, event_id)) AS import_version,
+  argMax(snapshot_month, tuple(recorded_at, event_id)) AS snapshot_month,
+  argMax(status, tuple(recorded_at, event_id)) AS status,
+  argMax(row_count, tuple(recorded_at, event_id)) AS row_count,
+  argMax(error_message, tuple(recorded_at, event_id)) AS error_message,
   max(recorded_at) AS latest_recorded_at
 FROM bulk_transform_attempt_events
 GROUP BY load_version, source_key;
@@ -113,16 +114,17 @@ CREATE TABLE IF NOT EXISTS bulk_runtime_state_events
   state_key LowCardinality(String),
   load_version String,
   snapshot_month LowCardinality(String),
+  event_id UUID DEFAULT generateUUIDv7(),
   recorded_at DateTime64(3, 'UTC')
 )
 ENGINE = MergeTree
-ORDER BY (state_key, recorded_at);
+ORDER BY (state_key, recorded_at, event_id);
 
 CREATE VIEW IF NOT EXISTS bulk_runtime_state_current AS
 SELECT
   state_key,
-  argMax(load_version, recorded_at) AS load_version,
-  argMax(snapshot_month, recorded_at) AS snapshot_month,
+  argMax(load_version, tuple(recorded_at, event_id)) AS load_version,
+  argMax(snapshot_month, tuple(recorded_at, event_id)) AS snapshot_month,
   max(recorded_at) AS latest_recorded_at
 FROM bulk_runtime_state_events
 GROUP BY state_key;

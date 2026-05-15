@@ -1,8 +1,6 @@
 // @vitest-environment node
 
 import { readFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { ClickHouseBulkApiRepository } from "./repository";
 
@@ -48,21 +46,12 @@ type RuntimeStateRow = {
   snapshot_month: string;
 };
 
-class SchemaAwareClickHouseClient {
-  readonly createdObjects = new Set<string>();
+class RuntimeCutoverClickHouseClient {
   private readonly hostnameServingRows: HostnameServingRow[] = [];
   private readonly runtimeStateRows: RuntimeStateRow[] = [];
 
   async command(call: { query: string }) {
     const query = call.query.trim();
-    const createMatch = query.match(
-      /^CREATE\s+(?:MATERIALIZED\s+)?(?:TABLE|VIEW)\s+IF\s+NOT\s+EXISTS\s+([a-zA-Z0-9_]+)/i,
-    );
-
-    if (createMatch) {
-      this.createdObjects.add(createMatch[1] ?? "");
-      return { query_id: `create-${this.createdObjects.size}` };
-    }
 
     if (query.includes("INSERT INTO bulk_runtime_state_events")) {
       const valuesMatch = query.match(
@@ -110,22 +99,6 @@ class SchemaAwareClickHouseClient {
       throw new Error("Test helper only supports active reverse-ip queries.");
     }
 
-    if (!this.createdObjects.has("bulk_hostname_raw")) {
-      throw new Error("Expected raw schema to define bulk_hostname_raw.");
-    }
-
-    if (!this.createdObjects.has("bulk_transform_attempt_events")) {
-      throw new Error("Expected serving schema to define bulk_transform_attempt_events.");
-    }
-
-    if (!this.createdObjects.has("bulk_transform_attempts_latest")) {
-      throw new Error("Expected serving schema to define bulk_transform_attempts_latest.");
-    }
-
-    if (!this.createdObjects.has("bulk_active_reverse_ip_serving")) {
-      throw new Error("Expected serving schema to define bulk_active_reverse_ip_serving.");
-    }
-
     const activeState = [...this.runtimeStateRows]
       .reverse()
       .find((row) => row.state_key === "hostname_serving");
@@ -152,31 +125,38 @@ class SchemaAwareClickHouseClient {
   }
 }
 
-function splitSqlStatements(sqlText: string) {
-  return sqlText
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-}
-
-async function registerClickHouseSchema(client: SchemaAwareClickHouseClient) {
-  const schemaDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../schema");
-
-  for (const schemaFile of ["clickhouse-raw.sql", "clickhouse-serving.sql"]) {
-    const sqlText = await readFile(path.join(schemaDir, schemaFile), "utf8");
-
-    for (const statement of splitSqlStatements(sqlText)) {
-      await client.command({ query: statement });
-    }
-  }
+async function readSchemaAsset(fileName: string) {
+  return readFile(new URL(`../../schema/${fileName}`, import.meta.url), "utf8");
 }
 
 describe("ClickHouseBulkApiRepository", () => {
-  it("reads reverse-ip rows from the active serving view after runtime cutover", async () => {
-    const client = new SchemaAwareClickHouseClient();
-    const repository = new ClickHouseBulkApiRepository({ client });
+  it("defines deterministic latest-state and active serving views in the ddl", async () => {
+    const [rawSchema, servingSchema] = await Promise.all([
+      readSchemaAsset("clickhouse-raw.sql"),
+      readSchemaAsset("clickhouse-serving.sql"),
+    ]);
 
-    await registerClickHouseSchema(client);
+    expect(rawSchema).toContain("CREATE TABLE IF NOT EXISTS bulk_hostname_raw");
+    expect(servingSchema).toMatch(
+      /CREATE TABLE IF NOT EXISTS bulk_transform_attempt_events[\s\S]*event_id UUID DEFAULT generateUUIDv7\(\)/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE VIEW IF NOT EXISTS bulk_transform_attempts_latest[\s\S]*argMax\(import_version, tuple\(recorded_at, event_id\)\) AS import_version[\s\S]*argMax\(status, tuple\(recorded_at, event_id\)\) AS status/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE TABLE IF NOT EXISTS bulk_runtime_state_events[\s\S]*event_id UUID DEFAULT generateUUIDv7\(\)/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE VIEW IF NOT EXISTS bulk_runtime_state_current[\s\S]*argMax\(load_version, tuple\(recorded_at, event_id\)\) AS load_version[\s\S]*argMax\(snapshot_month, tuple\(recorded_at, event_id\)\) AS snapshot_month/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE VIEW IF NOT EXISTS bulk_active_reverse_ip_serving[\s\S]*INNER JOIN bulk_runtime_state_current AS state[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = serving\.load_version/,
+    );
+  });
+
+  it("reads reverse-ip rows from the active serving view after runtime cutover", async () => {
+    const client = new RuntimeCutoverClickHouseClient();
+    const repository = new ClickHouseBulkApiRepository({ client });
 
     await client.exec({
       query: `
@@ -238,9 +218,6 @@ describe("ClickHouseBulkApiRepository", () => {
 
     const rows = await repository.lookupReverseIp({ ip: "203.0.113.10", limit: 10 });
 
-    expect(client.createdObjects.has("bulk_hostname_raw")).toBe(true);
-    expect(client.createdObjects.has("bulk_transform_attempt_events")).toBe(true);
-    expect(client.createdObjects.has("bulk_transform_attempts_latest")).toBe(true);
     expect(rows).toEqual([
       {
         hostname: "api.example.com",
