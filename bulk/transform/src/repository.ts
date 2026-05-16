@@ -176,7 +176,7 @@ export function deriveDomainParts(hostname: string) {
   const firstLabel = labels[0] ?? "";
   const twoLabelTld = labels.slice(-2).join(".");
 
-  if (labels.length >= 3 && MULTI_LABEL_TLDS.includes(twoLabelTld)) {
+  if (labels.length >= 3 && (MULTI_LABEL_TLDS as readonly string[]).includes(twoLabelTld)) {
     return {
       apexDomain: labels.slice(-3).join("."),
       tld: twoLabelTld,

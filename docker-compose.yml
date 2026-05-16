@@ -8,6 +8,8 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      - ${BULK_SNAPSHOT_STORAGE_PATH}:/var/lib/tech-stack-dashboard/bulk-snapshots:ro
+      - ${BULK_SNAPSHOT_STORAGE_PATH}:/var/lib/clickhouse/user_files/bulk-snapshots:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 10s

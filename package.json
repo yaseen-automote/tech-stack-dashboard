@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bulk:api:start": "tsx bulk/api/src/server.ts",
     "bulk:import": "tsx bulk/import/src/cli.ts",
     "bulk:import:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run bulk:import --",
     "bulk:transform": "tsx bulk/transform/src/cli.ts",
