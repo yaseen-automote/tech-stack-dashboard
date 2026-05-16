@@ -87,7 +87,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         SELECT DISTINCT
           hostname,
           snapshot_month
-        FROM bulk_active_reverse_ip_serving
+        FROM bulk_active_hostname_serving
         WHERE ip_address = {ip_address: String}
         ORDER BY hostname ASC
         LIMIT {limit: UInt64}
@@ -112,7 +112,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         SELECT DISTINCT
           hostname,
           snapshot_month
-        FROM bulk_active_subdomain_serving
+        FROM bulk_active_hostname_serving
         WHERE apex_domain = {apex_domain: String}
         ORDER BY hostname ASC
         LIMIT {limit: UInt64}

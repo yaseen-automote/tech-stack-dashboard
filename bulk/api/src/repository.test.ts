@@ -95,8 +95,8 @@ class RuntimeCutoverClickHouseClient {
   }
 
   async query(call: { query: string; query_params?: Record<string, unknown>; format?: string }) {
-    if (!call.query.includes("FROM bulk_active_reverse_ip_serving")) {
-      throw new Error("Test helper only supports active reverse-ip queries.");
+    if (!call.query.includes("FROM bulk_active_hostname_serving")) {
+      throw new Error("Test helper only supports active hostname serving queries.");
     }
 
     const activeState = [...this.runtimeStateRows]
@@ -150,7 +150,7 @@ describe("ClickHouseBulkApiRepository", () => {
       /CREATE VIEW IF NOT EXISTS bulk_runtime_state_current[\s\S]*argMax\(load_version, tuple\(recorded_at, event_id\)\) AS load_version[\s\S]*argMax\(snapshot_month, tuple\(recorded_at, event_id\)\) AS snapshot_month/,
     );
     expect(servingSchema).toMatch(
-      /CREATE VIEW IF NOT EXISTS bulk_active_reverse_ip_serving[\s\S]*INNER JOIN bulk_runtime_state_current AS state[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = serving\.load_version/,
+      /CREATE VIEW IF NOT EXISTS bulk_active_hostname_serving[\s\S]*INNER JOIN bulk_runtime_state_current AS state[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = serving\.load_version/,
     );
   });
 
@@ -246,7 +246,7 @@ describe("ClickHouseBulkApiRepository", () => {
       limit: 25,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM bulk_active_reverse_ip_serving");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
     expect(client.calls[0]?.query_params).toEqual({
       ip_address: "203.0.113.10",
       limit: 25,
@@ -275,7 +275,7 @@ describe("ClickHouseBulkApiRepository", () => {
       limit: 50,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM bulk_active_subdomain_serving");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
     expect(client.calls[0]?.query_params).toEqual({
       apex_domain: "example.com",
       limit: 50,
