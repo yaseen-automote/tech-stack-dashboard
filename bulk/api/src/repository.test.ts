@@ -95,8 +95,8 @@ class RuntimeCutoverClickHouseClient {
   }
 
   async query(call: { query: string; query_params?: Record<string, unknown>; format?: string }) {
-    if (!call.query.includes("FROM bulk_active_hostname_serving")) {
-      throw new Error("Test helper only supports active hostname serving queries.");
+    if (!call.query.includes("FROM bulk_active_hostname_serving") && !call.query.includes("FROM bulk_active_reverse_ip_lookup")) {
+      throw new Error("Test helper only supports active serving queries.");
     }
 
     const activeState = [...this.runtimeStateRows]
@@ -151,6 +151,18 @@ describe("ClickHouseBulkApiRepository", () => {
     );
     expect(servingSchema).toMatch(
       /CREATE VIEW IF NOT EXISTS bulk_active_hostname_serving[\s\S]*INNER JOIN bulk_runtime_state_current AS state[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = serving\.load_version/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE TABLE IF NOT EXISTS bulk_reverse_ip_lookup[\s\S]*ORDER BY \(load_version, ip_address, hostname\)/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE TABLE IF NOT EXISTS bulk_subdomain_lookup[\s\S]*ORDER BY \(load_version, apex_domain, hostname\)/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE VIEW IF NOT EXISTS bulk_active_reverse_ip_lookup[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = lookup\.load_version/,
+    );
+    expect(servingSchema).toMatch(
+      /CREATE VIEW IF NOT EXISTS bulk_active_subdomain_lookup[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = lookup\.load_version/,
     );
   });
 
@@ -246,7 +258,7 @@ describe("ClickHouseBulkApiRepository", () => {
       limit: 25,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_reverse_ip_lookup");
     expect(client.calls[0]?.query_params).toEqual({
       ip_address: "203.0.113.10",
       limit: 25,
@@ -275,7 +287,7 @@ describe("ClickHouseBulkApiRepository", () => {
       limit: 50,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_subdomain_lookup");
     expect(client.calls[0]?.query_params).toEqual({
       apex_domain: "example.com",
       limit: 50,
@@ -288,7 +300,28 @@ describe("ClickHouseBulkApiRepository", () => {
     ]);
   });
 
-  it("queries cname source hostnames under the requested apex domain", async () => {
+  it("returns all active subdomain rows when no limit is requested", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "api.example.com",
+          snapshot_month: "2026-04",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await repository.lookupSubdomains({
+      domain: "example.com",
+    });
+
+    expect(client.calls[0]?.query).not.toContain("LIMIT {limit: UInt64}");
+    expect(client.calls[0]?.query_params).toEqual({
+      apex_domain: "example.com",
+    });
+  });
+
+  it("queries cname source hostnames for the requested cname target", async () => {
     const client = new MockClickHouseClient([
       [
         {
@@ -304,17 +337,15 @@ describe("ClickHouseBulkApiRepository", () => {
     const repository = new ClickHouseBulkApiRepository({ client });
 
     const result = await repository.lookupCnameSources({
-      domain: "example.com",
-      limit: 25,
+      domain: "edge.example.net",
     });
 
     expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
-    expect(client.calls[0]?.query).toContain("apex_domain = {apex_domain: String}");
+    expect(client.calls[0]?.query).toContain("cname_target = {cname_target: String}");
     expect(client.calls[0]?.query).toContain("isNotNull(cname_target)");
     expect(client.calls[0]?.query).toContain("cname_target != ''");
     expect(client.calls[0]?.query_params).toEqual({
-      apex_domain: "example.com",
-      limit: 25,
+      cname_target: "edge.example.net",
     });
     expect(result).toEqual([
       {

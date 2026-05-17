@@ -8,7 +8,7 @@ type LookupRowsOptions = {
 };
 
 type BulkLookupOptions = {
-  limit: number;
+  limit?: number;
 };
 
 export type BulkHostnameRow = {
@@ -74,6 +74,10 @@ function normalizeSnapshotMonth(value: unknown) {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function withOptionalLimit(query: string, limit?: number) {
+  return typeof limit === "number" ? `${query}\n        LIMIT {limit: UInt64}\n      ` : query;
+}
+
 export class ClickHouseBulkApiRepository implements BulkApiRepository {
   private readonly client: ClickHouseClientLike;
 
@@ -83,18 +87,20 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
 
   async lookupReverseIp(params: { ip: string } & BulkLookupOptions): Promise<BulkHostnameRow[]> {
     const rows = await readRows<Record<string, unknown>>(this.client, {
-      query: `
-        SELECT DISTINCT
+      query: withOptionalLimit(
+        `
+        SELECT
           hostname,
           snapshot_month
-        FROM bulk_active_hostname_serving
+        FROM bulk_active_reverse_ip_lookup
         WHERE ip_address = {ip_address: String}
         ORDER BY hostname ASC
-        LIMIT {limit: UInt64}
       `,
+        params.limit,
+      ),
       queryParams: {
         ip_address: params.ip,
-        limit: params.limit,
+        ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       },
     });
 
@@ -108,18 +114,20 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
     params: { domain: string } & BulkLookupOptions,
   ): Promise<BulkHostnameRow[]> {
     const rows = await readRows<Record<string, unknown>>(this.client, {
-      query: `
-        SELECT DISTINCT
+      query: withOptionalLimit(
+        `
+        SELECT
           hostname,
           snapshot_month
-        FROM bulk_active_hostname_serving
+        FROM bulk_active_subdomain_lookup
         WHERE apex_domain = {apex_domain: String}
         ORDER BY hostname ASC
-        LIMIT {limit: UInt64}
       `,
+        params.limit,
+      ),
       queryParams: {
         apex_domain: params.domain,
-        limit: params.limit,
+        ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       },
     });
 
@@ -133,20 +141,22 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
     params: { domain: string } & BulkLookupOptions,
   ): Promise<BulkHostnameRow[]> {
     const rows = await readRows<Record<string, unknown>>(this.client, {
-      query: `
+      query: withOptionalLimit(
+        `
         SELECT DISTINCT
           hostname,
           snapshot_month
         FROM bulk_active_hostname_serving
-        WHERE apex_domain = {apex_domain: String}
+        WHERE cname_target = {cname_target: String}
           AND isNotNull(cname_target)
           AND cname_target != ''
         ORDER BY hostname ASC
-        LIMIT {limit: UInt64}
       `,
+        params.limit,
+      ),
       queryParams: {
-        apex_domain: params.domain,
-        limit: params.limit,
+        cname_target: params.domain,
+        ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
       },
     });
 
