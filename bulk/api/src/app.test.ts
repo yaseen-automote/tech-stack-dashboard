@@ -5,6 +5,10 @@ import { Hono } from "hono";
 import { createBulkApiApp } from "./app";
 import type { BulkApiConfig } from "./config";
 import type {
+  BulkCtAlertFeedResponse,
+  BulkCtAlertSummaryResponse,
+  BulkCtWatchlistMutationResponse,
+  BulkCtWatchlistResponse,
   BulkApiLookupService,
   BulkCnameLookupResponse,
   BulkInfrastructureSummaryResponse,
@@ -41,6 +45,14 @@ function buildLookupService(): BulkApiLookupService {
     lookupSubdomains: vi.fn<() => Promise<BulkSubdomainLookupResponse>>(),
     lookupCnames: vi.fn<() => Promise<BulkCnameLookupResponse>>(),
     lookupInfrastructureSummary: vi.fn<() => Promise<BulkInfrastructureSummaryResponse>>(),
+    lookupCtAlertSummary: vi.fn<() => Promise<BulkCtAlertSummaryResponse>>(),
+    lookupCtAlerts: vi.fn<() => Promise<BulkCtAlertFeedResponse>>(),
+    listCtWatchlistEntries: vi.fn<() => Promise<BulkCtWatchlistResponse>>(),
+    createCtWatchlistEntry: vi.fn<() => Promise<BulkCtWatchlistMutationResponse>>(),
+    updateCtWatchlistEntry: vi.fn<
+      () => Promise<BulkCtWatchlistMutationResponse | null>
+    >(),
+    deleteCtWatchlistEntry: vi.fn<() => Promise<boolean>>(),
   };
 }
 
@@ -127,7 +139,7 @@ describe("createBulkApiApp", () => {
   it("passes subdomain requests through to the lookup service", async () => {
     const lookupService = buildLookupService();
     vi.mocked(lookupService.lookupSubdomains).mockResolvedValue({
-      domain: "example.com",
+      domain: "Domains & Subdomains Discovery",
       results: [
         {
           id: "api.example.com-0",
@@ -145,15 +157,22 @@ describe("createBulkApiApp", () => {
       lookupService,
     });
 
-    const response = await request(app, "/v1/subdomains?domain=EXAMPLE.com&limit=5");
+    const response = await request(
+      app,
+      "/v1/subdomains?scope=both&domainTerm=EXAMPLE*&domainModifier=starts_with&subdomainTerm=api&subdomainModifier=contains&limit=bogus",
+    );
 
     expect(lookupService.lookupSubdomains).toHaveBeenCalledWith({
-      domain: "example.com",
-      limit: 5,
+      scope: "both",
+      domainTerm: "example*",
+      domainModifier: "starts_with",
+      subdomainTerm: "api",
+      subdomainModifier: "contains",
+      limit: 100,
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
-      domain: "example.com",
+      domain: "Domains & Subdomains Discovery",
       results: [
         {
           id: "api.example.com-0",
@@ -164,6 +183,60 @@ describe("createBulkApiApp", () => {
       ],
       snapshotMonth: "2026-04",
       source: "bulk",
+    });
+  });
+
+  it("rejects subdomain searches without any effective predicates", async () => {
+    const lookupService = buildLookupService();
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(app, "/v1/subdomains?scope=domains");
+
+    expect(response.status).toBe(400);
+    expect(lookupService.lookupSubdomains).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Enter at least one domain or subdomain search term to inspect subdomain infrastructure.",
+    });
+  });
+
+  it("rejects invalid domain modifiers before invoking the lookup service", async () => {
+    const lookupService = buildLookupService();
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(
+      app,
+      "/v1/subdomains?scope=domains&domainTerm=example&domainModifier=equals",
+    );
+
+    expect(response.status).toBe(400);
+    expect(lookupService.lookupSubdomains).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Select a valid domain search modifier.",
+    });
+  });
+
+  it("rejects raw SQL wildcard characters before invoking the lookup service", async () => {
+    const lookupService = buildLookupService();
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(
+      app,
+      "/v1/subdomains?scope=both&subdomainTerm=api_internal&subdomainModifier=contains",
+    );
+
+    expect(response.status).toBe(400);
+    expect(lookupService.lookupSubdomains).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Use * as the only wildcard in domain and subdomain search terms.",
     });
   });
 
@@ -188,11 +261,10 @@ describe("createBulkApiApp", () => {
       lookupService,
     });
 
-    const response = await request(app, "/v1/cnames?domain=phrack.org&limit=15");
+    const response = await request(app, "/v1/cnames?domain=phrack.org");
 
     expect(lookupService.lookupCnames).toHaveBeenCalledWith({
       domain: "phrack.org",
-      limit: 15,
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
@@ -255,6 +327,225 @@ describe("createBulkApiApp", () => {
         { provider: "Fastly", count: 1 },
       ],
       cnameTargets: [{ target: "edge.example.net", count: 1 }],
+    });
+  });
+
+  it("passes CT alert feed filters through to the lookup service", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.lookupCtAlerts).mockResolvedValue({
+      results: [
+        {
+          id: "alert-1",
+          observedAt: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watchType: "brand",
+          matchedTerm: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuerName: "Let's Encrypt",
+        },
+      ],
+      pagination: {
+        limit: 25,
+        offset: 50,
+        total: 51,
+      },
+      source: "bulk",
+    });
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(
+      app,
+      "/v1/ct/alerts?category=phishing&severity=high&watchType=brand&dumpDate=2026-05-18&limit=25&offset=50",
+    );
+
+    expect(lookupService.lookupCtAlerts).toHaveBeenCalledWith({
+      category: "phishing",
+      severity: "high",
+      watchType: "brand",
+      dumpDate: "2026-05-18",
+      limit: 25,
+      offset: 50,
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      results: [
+        {
+          id: "alert-1",
+          observedAt: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watchType: "brand",
+          matchedTerm: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuerName: "Let's Encrypt",
+        },
+      ],
+      pagination: {
+        limit: 25,
+        offset: 50,
+        total: 51,
+      },
+      source: "bulk",
+    });
+  });
+
+  it("rejects invalid CT alert category filters before invoking the lookup service", async () => {
+    const lookupService = buildLookupService();
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(app, "/v1/ct/alerts?category=noise");
+
+    expect(response.status).toBe(400);
+    expect(lookupService.lookupCtAlerts).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Select a valid CT alert category.",
+    });
+  });
+
+  it("returns CT alert summary metadata", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.lookupCtAlertSummary).mockResolvedValue({
+      newestDumpDate: "2026-05-18",
+      totals: {
+        alerts: 12,
+        phishing: 5,
+        brandProtection: 4,
+        shadowIt: 3,
+        highSeverity: 7,
+      },
+      source: "bulk",
+    });
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(app, "/v1/ct/alerts/summary");
+
+    expect(response.status).toBe(200);
+    expect(lookupService.lookupCtAlertSummary).toHaveBeenCalledTimes(1);
+    await expect(response.json()).resolves.toEqual({
+      newestDumpDate: "2026-05-18",
+      totals: {
+        alerts: 12,
+        phishing: 5,
+        brandProtection: 4,
+        shadowIt: 3,
+        highSeverity: 7,
+      },
+      source: "bulk",
+    });
+  });
+
+  it("creates CT watchlist entries", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.createCtWatchlistEntry).mockResolvedValue({
+      entry: {
+        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        watchType: "brand",
+        term: "openai",
+        enabled: true,
+        createdAt: "2026-05-18T06:00:00.000Z",
+        updatedAt: "2026-05-18T06:00:00.000Z",
+      },
+      source: "bulk",
+    });
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await app.request("http://localhost/v1/ct/watchlists", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        watchType: "brand",
+        term: "OpenAI",
+        enabled: true,
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(lookupService.createCtWatchlistEntry).toHaveBeenCalledWith({
+      watchType: "brand",
+      term: "OpenAI",
+      enabled: true,
+    });
+  });
+
+  it("updates CT watchlist entries", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.updateCtWatchlistEntry).mockResolvedValue({
+      entry: {
+        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        watchType: "brand",
+        term: "chatgpt",
+        enabled: false,
+        createdAt: "2026-05-18T06:00:00.000Z",
+        updatedAt: "2026-05-18T07:00:00.000Z",
+      },
+      source: "bulk",
+    });
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await app.request(
+      "http://localhost/v1/ct/watchlists/3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          term: "ChatGPT",
+          enabled: false,
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(lookupService.updateCtWatchlistEntry).toHaveBeenCalledWith({
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      term: "ChatGPT",
+      enabled: false,
+    });
+  });
+
+  it("deletes CT watchlist entries", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.deleteCtWatchlistEntry).mockResolvedValue(true);
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await app.request(
+      "http://localhost/v1/ct/watchlists/3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      {
+        method: "DELETE",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(lookupService.deleteCtWatchlistEntry).toHaveBeenCalledWith(
+      "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+    );
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
     });
   });
 });

@@ -240,7 +240,7 @@ export function LandingPage() {
             {[
               {
                 icon: Radar,
-                title: "Subdomain Lookup",
+                title: "Domain & Subdomain Discovery",
                 description: "Enumerate live subdomains from passive DNS datasets. Classify each host by function: application, CDN, mail, API, internal.",
                 delay: 0,
               },

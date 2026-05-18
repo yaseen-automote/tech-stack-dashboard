@@ -34,6 +34,12 @@ function buildRepository(): BulkApiRepository {
     lookupCnameSources: vi.fn(),
     hasBulkCnameSupport: vi.fn(),
     lookupInfrastructureSummary: vi.fn(),
+    lookupCtAlertSummary: vi.fn(),
+    lookupCtAlerts: vi.fn(),
+    listCtWatchlistEntries: vi.fn(),
+    createCtWatchlistEntry: vi.fn(),
+    updateCtWatchlistEntry: vi.fn(),
+    deleteCtWatchlistEntry: vi.fn(),
   };
 }
 
@@ -83,9 +89,9 @@ describe("createBulkApiLookupService", () => {
   it("classifies bulk subdomain rows with the existing dashboard heuristics", async () => {
     const repository = buildRepository();
     vi.mocked(repository.lookupSubdomains).mockResolvedValue([
-      { hostname: "example.com", snapshotMonth: "2026-04" },
-      { hostname: "api.example.com", snapshotMonth: "2026-04" },
-      { hostname: "staging.example.com", snapshotMonth: "2026-04" },
+      { hostname: "example.com", apexDomain: "example.com", snapshotMonth: "2026-04" },
+      { hostname: "api.example.com", apexDomain: "example.com", snapshotMonth: "2026-04" },
+      { hostname: "staging.example.org", apexDomain: "example.org", snapshotMonth: "2026-04" },
     ]);
     const service = createBulkApiLookupService({
       config: buildConfig(),
@@ -94,12 +100,14 @@ describe("createBulkApiLookupService", () => {
     });
 
     const response = await service.lookupSubdomains({
-      domain: "example.com",
+      scope: "both",
+      domainTerm: "example",
+      domainModifier: "contains",
       limit: 10,
     });
 
     expect(response).toEqual({
-      domain: "example.com",
+      domain: "Domains & Subdomains Discovery",
       results: [
         {
           id: "example.com-0",
@@ -114,8 +122,8 @@ describe("createBulkApiLookupService", () => {
           status: "Live",
         },
         {
-          id: "staging.example.com-2",
-          subdomain: "staging.example.com",
+          id: "staging.example.org-2",
+          subdomain: "staging.example.org",
           type: "Environment",
           status: "Review",
         },
@@ -123,9 +131,34 @@ describe("createBulkApiLookupService", () => {
       snapshotMonth: "2026-04",
       source: "bulk",
     });
+    expect(repository.lookupSubdomains).toHaveBeenCalledWith({
+      scope: "both",
+      domainTerm: "example",
+      domainModifier: "contains",
+      limit: 10,
+    });
   });
 
-  it("uses bulk cname rows when the active dataset supports cname targets", async () => {
+  it("rejects raw SQL wildcard characters consistently before hitting the repository", async () => {
+    const repository = buildRepository();
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    await expect(
+      service.lookupSubdomains({
+        scope: "both",
+        domainTerm: "exa%mple",
+        domainModifier: "contains",
+        limit: 100,
+      }),
+    ).rejects.toThrow("Use * as the only wildcard in domain and subdomain search terms.");
+    expect(repository.lookupSubdomains).not.toHaveBeenCalled();
+  });
+
+  it("uses bulk cname rows that point at the requested cname target", async () => {
     const repository = buildRepository();
     vi.mocked(repository.hasBulkCnameSupport).mockResolvedValue(true);
     vi.mocked(repository.lookupCnameSources).mockResolvedValue([
@@ -140,13 +173,15 @@ describe("createBulkApiLookupService", () => {
     });
 
     const response = await service.lookupCnames({
-      domain: "phrack.org",
-      limit: 10,
+      domain: "edge.example.net",
     });
 
     expect(fetchSpy).not.toHaveBeenCalled();
+    expect(repository.lookupCnameSources).toHaveBeenCalledWith({
+      domain: "edge.example.net",
+    });
     expect(response).toEqual({
-      domain: "phrack.org",
+      domain: "edge.example.net",
       results: [
         {
           id: "www.phrack.org-0",
@@ -182,7 +217,6 @@ describe("createBulkApiLookupService", () => {
 
     const response = await service.lookupCnames({
       domain: "phrack.org",
-      limit: 2,
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -212,6 +246,12 @@ describe("createBulkApiLookupService", () => {
         {
           id: "phrack.com-1",
           subdomain: "phrack.com",
+          type: "CNAME",
+          status: "Live",
+        },
+        {
+          id: "cdn.phrack.org-2",
+          subdomain: "cdn.phrack.org",
           type: "CNAME",
           status: "Live",
         },
@@ -262,5 +302,197 @@ describe("createBulkApiLookupService", () => {
       ],
       cnameTargets: [{ target: "edge.example.net", count: 1 }],
     });
+  });
+
+  it("returns CT alert summary counters from ClickHouse", async () => {
+    const repository = buildRepository();
+    vi.mocked(repository.lookupCtAlertSummary).mockResolvedValue({
+      newestDumpDate: "2026-05-18",
+      totals: {
+        alerts: 12,
+        phishing: 5,
+        brandProtection: 4,
+        shadowIt: 3,
+        highSeverity: 7,
+      },
+    });
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    await expect(service.lookupCtAlertSummary()).resolves.toEqual({
+      newestDumpDate: "2026-05-18",
+      totals: {
+        alerts: 12,
+        phishing: 5,
+        brandProtection: 4,
+        shadowIt: 3,
+        highSeverity: 7,
+      },
+      source: "bulk",
+    });
+  });
+
+  it("returns filtered CT alert feed data with pagination metadata", async () => {
+    const repository = buildRepository();
+    vi.mocked(repository.lookupCtAlerts).mockResolvedValue({
+      results: [
+        {
+          id: "alert-1",
+          observedAt: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watchType: "brand",
+          matchedTerm: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuerName: "Let's Encrypt",
+        },
+      ],
+      total: 1,
+    });
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    const response = await service.lookupCtAlerts({
+      limit: 25,
+      offset: 50,
+      category: "phishing",
+      severity: "high",
+      watchType: "brand",
+      dumpDate: "2026-05-18",
+    });
+
+    expect(repository.lookupCtAlerts).toHaveBeenCalledWith({
+      limit: 25,
+      offset: 50,
+      category: "phishing",
+      severity: "high",
+      watchType: "brand",
+      dumpDate: "2026-05-18",
+    });
+    expect(response).toEqual({
+      results: [
+        {
+          id: "alert-1",
+          observedAt: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watchType: "brand",
+          matchedTerm: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuerName: "Let's Encrypt",
+        },
+      ],
+      pagination: {
+        limit: 25,
+        offset: 50,
+        total: 1,
+      },
+      source: "bulk",
+    });
+  });
+
+  it("normalizes CT watchlist terms before creating entries", async () => {
+    const repository = buildRepository();
+    vi.mocked(repository.createCtWatchlistEntry).mockResolvedValue({
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      watchType: "brand",
+      term: "openai",
+      enabled: true,
+      createdAt: "2026-05-18T06:00:00.000Z",
+      updatedAt: "2026-05-18T06:00:00.000Z",
+    });
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    const response = await service.createCtWatchlistEntry({
+      watchType: "brand",
+      term: " OpenAI ",
+      enabled: true,
+    });
+
+    expect(repository.createCtWatchlistEntry).toHaveBeenCalledWith({
+      watchType: "brand",
+      term: "openai",
+      enabled: true,
+    });
+    expect(response).toEqual({
+      entry: {
+        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        watchType: "brand",
+        term: "openai",
+        enabled: true,
+        createdAt: "2026-05-18T06:00:00.000Z",
+        updatedAt: "2026-05-18T06:00:00.000Z",
+      },
+      source: "bulk",
+    });
+  });
+
+  it("normalizes CT watchlist terms before updating entries", async () => {
+    const repository = buildRepository();
+    vi.mocked(repository.updateCtWatchlistEntry).mockResolvedValue({
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      watchType: "brand",
+      term: "chatgpt",
+      enabled: false,
+      createdAt: "2026-05-18T06:00:00.000Z",
+      updatedAt: "2026-05-18T07:00:00.000Z",
+    });
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    const response = await service.updateCtWatchlistEntry({
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      term: " ChatGPT ",
+      enabled: false,
+    });
+
+    expect(repository.updateCtWatchlistEntry).toHaveBeenCalledWith({
+      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      term: "chatgpt",
+      enabled: false,
+    });
+    expect(response).toEqual({
+      entry: {
+        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        watchType: "brand",
+        term: "chatgpt",
+        enabled: false,
+        createdAt: "2026-05-18T06:00:00.000Z",
+        updatedAt: "2026-05-18T07:00:00.000Z",
+      },
+      source: "bulk",
+    });
+  });
+
+  it("passes CT watchlist delete requests through to the repository", async () => {
+    const repository = buildRepository();
+    vi.mocked(repository.deleteCtWatchlistEntry).mockResolvedValue(true);
+    const service = createBulkApiLookupService({
+      config: buildConfig(),
+      repository,
+      fetch: vi.fn(),
+    });
+
+    await expect(
+      service.deleteCtWatchlistEntry("3f8ea328-7f4f-4476-9ad4-a80b426fd444"),
+    ).resolves.toBe(true);
+    expect(repository.deleteCtWatchlistEntry).toHaveBeenCalledWith(
+      "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+    );
   });
 });

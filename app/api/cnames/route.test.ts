@@ -46,7 +46,7 @@ describe("GET /api/cnames", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [upstreamUrl, init] = fetchSpy.mock.calls[0] ?? [];
 
-    expect(String(upstreamUrl)).toBe("http://127.0.0.1:8787/v1/cnames?domain=phrack.org&limit=25");
+    expect(String(upstreamUrl)).toBe("http://127.0.0.1:8787/v1/cnames?domain=phrack.org");
     expect(init).toMatchObject({
       cache: "no-store",
       headers: {

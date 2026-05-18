@@ -10,12 +10,30 @@ type QueryCall = {
   format?: string;
 };
 
+type InsertCall = {
+  table: string;
+  values: Array<Record<string, unknown>>;
+  format?: string;
+};
+
 class MockClickHouseClient {
   readonly calls: QueryCall[] = [];
+  readonly commands: QueryCall[] = [];
+  readonly inserts: InsertCall[] = [];
   private readonly responses: Array<Record<string, unknown>[]>;
 
   constructor(responses: Array<Record<string, unknown>[]>) {
     this.responses = [...responses];
+  }
+
+  async command(call: QueryCall) {
+    this.commands.push(call);
+    return { query_id: `command-${this.commands.length}` };
+  }
+
+  async insert(call: InsertCall) {
+    this.inserts.push(call);
+    return { query_id: `insert-${this.inserts.length}` };
   }
 
   async query(call: QueryCall) {
@@ -71,6 +89,10 @@ class RuntimeCutoverClickHouseClient {
     }
 
     return { query_id: "command-ignored" };
+  }
+
+  async insert() {
+    return { query_id: "insert-ignored" };
   }
 
   async exec(call: { query: string; values: HostnameServingRow[] }) {
@@ -129,6 +151,10 @@ async function readSchemaAsset(fileName: string) {
   return readFile(new URL(`../../schema/${fileName}`, import.meta.url), "utf8");
 }
 
+async function readCtSchemaAsset() {
+  return readFile(new URL("../../../ct/schema/clickhouse-ct.sql", import.meta.url), "utf8");
+}
+
 describe("ClickHouseBulkApiRepository", () => {
   it("defines deterministic latest-state and active serving views in the ddl", async () => {
     const [rawSchema, servingSchema] = await Promise.all([
@@ -164,6 +190,18 @@ describe("ClickHouseBulkApiRepository", () => {
     expect(servingSchema).toMatch(
       /CREATE VIEW IF NOT EXISTS bulk_active_subdomain_lookup[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = lookup\.load_version/,
     );
+  });
+
+  it("defines CT raw, alert feed, and active runtime views in the DDL", async () => {
+    const schema = await readCtSchemaAsset();
+
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS ct_log_line_raw");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS ct_import_attempt_events");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS ct_domain_observation");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS ct_alert_feed");
+    expect(schema).toContain("CREATE TABLE IF NOT EXISTS ct_watchlist_entry");
+    expect(schema).toContain("CREATE VIEW IF NOT EXISTS ct_runtime_state_current");
+    expect(schema).toContain("CREATE VIEW IF NOT EXISTS ct_active_alert_feed");
   });
 
   it("reads reverse-ip rows from the active serving view after runtime cutover", async () => {
@@ -271,11 +309,12 @@ describe("ClickHouseBulkApiRepository", () => {
     ]);
   });
 
-  it("queries the active subdomain serving view", async () => {
+  it("queries the active subdomain serving view with modular predicates", async () => {
     const client = new MockClickHouseClient([
       [
         {
           hostname: "api.example.com",
+          apex_domain: "example.com",
           snapshot_month: "2026-04",
         },
       ],
@@ -283,28 +322,38 @@ describe("ClickHouseBulkApiRepository", () => {
     const repository = new ClickHouseBulkApiRepository({ client });
 
     const result = await repository.lookupSubdomains({
-      domain: "example.com",
+      scope: "subdomains",
+      domainTerm: "example*",
+      domainModifier: "starts_with",
+      subdomainTerm: "*api",
+      subdomainModifier: "ends_with",
       limit: 50,
     });
 
     expect(client.calls[0]?.query).toContain("FROM bulk_active_subdomain_lookup");
+    expect(client.calls[0]?.query).toContain("hostname != apex_domain");
+    expect(client.calls[0]?.query).toContain("apex_domain LIKE {domain_term: String}");
+    expect(client.calls[0]?.query).toContain("hostname LIKE {subdomain_term: String}");
     expect(client.calls[0]?.query_params).toEqual({
-      apex_domain: "example.com",
+      domain_term: "example%",
+      subdomain_term: "%api",
       limit: 50,
     });
     expect(result).toEqual([
       {
         hostname: "api.example.com",
+        apexDomain: "example.com",
         snapshotMonth: "2026-04",
       },
     ]);
   });
 
-  it("returns all active subdomain rows when no limit is requested", async () => {
+  it("applies a safe fallback limit for active subdomain searches", async () => {
     const client = new MockClickHouseClient([
       [
         {
           hostname: "api.example.com",
+          apex_domain: "example.com",
           snapshot_month: "2026-04",
         },
       ],
@@ -312,13 +361,51 @@ describe("ClickHouseBulkApiRepository", () => {
     const repository = new ClickHouseBulkApiRepository({ client });
 
     await repository.lookupSubdomains({
-      domain: "example.com",
+      scope: "domains",
+      domainTerm: "",
+      domainModifier: "contains",
+      subdomainTerm: "portal",
+      subdomainModifier: "contains",
+      limit: Number.NaN,
     });
 
-    expect(client.calls[0]?.query).not.toContain("LIMIT {limit: UInt64}");
+    expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
     expect(client.calls[0]?.query_params).toEqual({
-      apex_domain: "example.com",
+      subdomain_term: "%portal%",
+      limit: 100,
     });
+    expect(client.calls[0]?.query).toContain("hostname = apex_domain");
+  });
+
+  it("rejects unbounded subdomain searches before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.lookupSubdomains({
+        scope: "both",
+        domainTerm: "*",
+        domainModifier: "contains",
+        subdomainTerm: "   ",
+        subdomainModifier: "contains",
+      }),
+    ).rejects.toThrow("Enter at least one domain or subdomain search term to inspect subdomain infrastructure.");
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("rejects raw SQL wildcard characters before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.lookupSubdomains({
+        scope: "both",
+        domainTerm: "exa_mple",
+        domainModifier: "contains",
+        limit: 100,
+      }),
+    ).rejects.toThrow("Use * as the only wildcard in domain and subdomain search terms.");
+    expect(client.calls).toHaveLength(0);
   });
 
   it("queries cname source hostnames for the requested cname target", async () => {
@@ -408,5 +495,139 @@ describe("ClickHouseBulkApiRepository", () => {
 
     await expect(repository.hasBulkCnameSupport()).resolves.toBe(true);
     expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+  });
+
+  it("queries CT alert summary counters from the active alert feed", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          newest_dump_date: "2026-05-18",
+          alert_count: "12",
+          phishing_count: "5",
+          brand_protection_count: "4",
+          shadow_it_count: "3",
+          high_severity_count: "7",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(repository.lookupCtAlertSummary()).resolves.toEqual({
+      newestDumpDate: "2026-05-18",
+      totals: {
+        alerts: 12,
+        phishing: 5,
+        brandProtection: 4,
+        shadowIt: 3,
+        highSeverity: 7,
+      },
+    });
+    expect(client.calls[0]?.query).toContain("FROM ct_active_alert_feed");
+  });
+
+  it("queries filtered CT alert rows and total counts", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          alert_id: "alert-1",
+          dump_date: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watch_type: "brand",
+          matched_term: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuer_name: "Let's Encrypt",
+        },
+      ],
+      [{ total_count: "51" }],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.lookupCtAlerts({
+        limit: 25,
+        offset: 50,
+        category: "phishing",
+        severity: "high",
+        watchType: "brand",
+        dumpDate: "2026-05-18",
+      }),
+    ).resolves.toEqual({
+      results: [
+        {
+          id: "alert-1",
+          observedAt: "2026-05-18",
+          domain: "secure-openai-login.net",
+          category: "phishing",
+          severity: "high",
+          watchType: "brand",
+          matchedTerm: "openai",
+          reasons: ["contains watched brand term", "contains risky login keyword"],
+          issuerName: "Let's Encrypt",
+        },
+      ],
+      total: 51,
+    });
+    expect(client.calls[0]?.query).toContain("FROM ct_active_alert_feed");
+    expect(client.calls[0]?.query).toContain("category = {category: String}");
+    expect(client.calls[0]?.query_params).toEqual({
+      category: "phishing",
+      severity: "high",
+      watch_type: "brand",
+      dump_date: "2026-05-18",
+      limit: 25,
+      offset: 50,
+    });
+  });
+
+  it("lists CT watchlist entries from the latest replaced rows", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          entry_id: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+          watch_type: "brand",
+          term: "openai",
+          enabled: 1,
+          created_at: "2026-05-18 06:00:00",
+          updated_at: "2026-05-18 07:00:00",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(repository.listCtWatchlistEntries()).resolves.toEqual([
+      {
+        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        watchType: "brand",
+        term: "openai",
+        enabled: true,
+        createdAt: "2026-05-18 06:00:00",
+        updatedAt: "2026-05-18 07:00:00",
+      },
+    ]);
+    expect(client.calls[0]?.query).toContain("FROM ct_watchlist_entry FINAL");
+  });
+
+  it("creates CT watchlist entries with generated ids", async () => {
+    const client = new MockClickHouseClient([]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    const result = await repository.createCtWatchlistEntry({
+      watchType: "brand",
+      term: "openai",
+      enabled: true,
+    });
+
+    expect(result.watchType).toBe("brand");
+    expect(result.term).toBe("openai");
+    expect(result.enabled).toBe(true);
+    expect(client.inserts).toHaveLength(1);
+    expect(client.inserts[0]?.table).toBe("ct_watchlist_entry");
+    expect(client.inserts[0]?.values[0]).toMatchObject({
+      watch_type: "brand",
+      term: "openai",
+      enabled: true,
+    });
   });
 });

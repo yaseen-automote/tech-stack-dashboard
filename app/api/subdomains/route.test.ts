@@ -5,23 +5,53 @@ describe("GET /api/subdomains", () => {
     vi.restoreAllMocks();
   });
 
-  it("rejects invalid domains before calling the upstream service", async () => {
+  it("rejects requests that do not contain any effective domain or subdomain predicates", async () => {
     const fetchSpy = vi.spyOn(global, "fetch");
-    const request = new Request("http://localhost:3000/api/subdomains?domain=invalid domain");
+    const request = new Request("http://localhost:3000/api/subdomains?scope=both");
 
     const response = await GET(request);
 
     expect(response.status).toBe(400);
     expect(fetchSpy).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({
-      error: "Enter a valid domain to inspect subdomain infrastructure.",
+      error: "Enter at least one domain or subdomain search term to inspect subdomain infrastructure.",
     });
   });
 
-  it("proxies valid requests to the bulk subdomains API and preserves the payload", async () => {
+  it("rejects invalid subdomain modifiers before calling the upstream service", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch");
+    const request = new Request(
+      "http://localhost:3000/api/subdomains?scope=subdomains&subdomainTerm=api&subdomainModifier=equals",
+    );
+
+    const response = await GET(request);
+
+    expect(response.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Select a valid subdomain search modifier.",
+    });
+  });
+
+  it("rejects raw SQL wildcard characters before calling the upstream service", async () => {
+    const fetchSpy = vi.spyOn(global, "fetch");
+    const request = new Request(
+      "http://localhost:3000/api/subdomains?scope=both&domainTerm=exa%mple&domainModifier=contains",
+    );
+
+    const response = await GET(request);
+
+    expect(response.status).toBe(400);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      error: "Use * as the only wildcard in domain and subdomain search terms.",
+    });
+  });
+
+  it("proxies modular search requests to the bulk subdomains API and preserves the payload", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       Response.json({
-        domain: "example.com",
+        domain: "Domains & Subdomains Discovery",
         results: [
           {
             id: "example.com-0",
@@ -47,12 +77,16 @@ describe("GET /api/subdomains", () => {
       }),
     );
 
-    const request = new Request("http://localhost:3000/api/subdomains?domain=example.com");
+    const request = new Request(
+      "http://localhost:3000/api/subdomains?scope=both&domainTerm=Example*&domainModifier=starts_with&subdomainTerm=api&subdomainModifier=contains&limit=invalid",
+    );
     const response = await GET(request);
 
     expect(response.status).toBe(200);
     expect(global.fetch).toHaveBeenCalledWith(
-      new URL("http://127.0.0.1:8787/v1/subdomains?domain=example.com&limit=100"),
+      new URL(
+        "http://127.0.0.1:8787/v1/subdomains?scope=both&domainTerm=example*&domainModifier=starts_with&subdomainTerm=api&subdomainModifier=contains&limit=100",
+      ),
       expect.objectContaining({
         cache: "no-store",
         headers: {
@@ -61,7 +95,7 @@ describe("GET /api/subdomains", () => {
       }),
     );
     await expect(response.json()).resolves.toEqual({
-      domain: "example.com",
+      domain: "Domains & Subdomains Discovery",
       results: [
         {
           id: "example.com-0",
@@ -95,7 +129,9 @@ describe("GET /api/subdomains", () => {
       ),
     );
 
-    const request = new Request("http://localhost:3000/api/subdomains?domain=google.com");
+    const request = new Request(
+      "http://localhost:3000/api/subdomains?scope=domains&domainTerm=google.com&domainModifier=contains",
+    );
     const response = await GET(request);
 
     expect(response.status).toBe(502);

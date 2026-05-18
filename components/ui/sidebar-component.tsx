@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { Cpu, Globe, Network, Radar, Search } from "lucide-react";
+import { BellDot, Cpu, Globe, Network, Radar, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type TabId = "subdomain" | "cname" | "reverse-dns" | "tech-stack";
+export type TabId = "subdomain" | "cname" | "reverse-dns" | "tech-stack" | "ct-monitor";
 
 type LookupWorkspaceSidebarProps = {
   className?: string;
@@ -13,10 +13,11 @@ type LookupWorkspaceSidebarProps = {
 };
 
 const navItems: { id: TabId; label: string; icon: typeof Radar }[] = [
-  { id: "subdomain", label: "Subdomain Lookup", icon: Radar },
+  { id: "subdomain", label: "Domain & Subdomain Discovery", icon: Radar },
   { id: "cname", label: "CNAME Lookup", icon: Globe },
   { id: "reverse-dns", label: "Reverse DNS", icon: Network },
   { id: "tech-stack", label: "Tech Stack", icon: Cpu },
+  { id: "ct-monitor", label: "CT Monitor", icon: BellDot },
 ];
 
 export function LookupWorkspaceSidebar({

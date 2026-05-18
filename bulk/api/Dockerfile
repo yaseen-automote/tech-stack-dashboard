@@ -15,6 +15,7 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json ./
 COPY bulk ./bulk
+COPY ct ./ct
 COPY lib ./lib
 EXPOSE 8787
 CMD ["npm", "run", "bulk:api:start"]

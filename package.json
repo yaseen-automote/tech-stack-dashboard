@@ -13,7 +13,13 @@
     "bulk:import": "tsx bulk/import/src/cli.ts",
     "bulk:import:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run bulk:import --",
     "bulk:transform": "tsx bulk/transform/src/cli.ts",
-    "bulk:transform:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run bulk:transform --"
+    "bulk:transform:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run bulk:transform --",
+    "ct:fetch": "tsx ct/fetch/src/cli.ts",
+    "ct:import": "tsx ct/import/src/cli.ts",
+    "ct:transform": "tsx ct/transform/src/cli.ts",
+    "ct:fetch:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run ct:fetch --",
+    "ct:import:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run ct:import --",
+    "ct:transform:compose": "docker compose --env-file .env.bulk exec -T bulk-api npm run ct:transform --"
   },
   "dependencies": {
     "@carbon/icons-react": "^11.80.0",

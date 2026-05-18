@@ -16,7 +16,6 @@ export async function GET(request: Request) {
 
   const upstreamUrl = new URL("/v1/cnames", getBulkApiBaseUrl());
   upstreamUrl.searchParams.set("domain", normalizedDomain);
-  upstreamUrl.searchParams.set("limit", "25");
 
   try {
     const response = await fetch(upstreamUrl, {
