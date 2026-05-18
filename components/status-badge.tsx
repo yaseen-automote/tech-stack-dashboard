@@ -18,7 +18,7 @@ export function StatusBadge({ children, tone = "neutral" }: StatusBadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1 rounded-md border px-2 text-xs font-medium",
+        "inline-flex min-h-6 items-center gap-1 rounded-md border px-2 text-xs font-medium",
         toneClassName[tone],
       )}
       data-accent-color={accentColor}
