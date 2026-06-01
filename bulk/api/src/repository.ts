@@ -429,6 +429,9 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       conditions.push("toDate(loaded_at) >= toDate({addedSince:String})");
     }
 
+    const includeConditions: string[] = [];
+    const excludeConditions: string[] = [];
+
     for (let i = 0; i < domainFilters.length; i++) {
       const filter = domainFilters[i];
       const paramKey = `${prefix}term_${i}`;
@@ -438,7 +441,22 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         paramKey,
         params,
       );
-      conditions.push(filter.include ? condition : `NOT (${condition})`);
+      if (filter.include) {
+        includeConditions.push(condition);
+      } else {
+        excludeConditions.push(condition);
+      }
+    }
+
+    if (includeConditions.length > 0) {
+      conditions.push(
+        includeConditions.length === 1
+          ? includeConditions[0]
+          : `(${includeConditions.join("\n          OR ")})`,
+      );
+    }
+    for (const cond of excludeConditions) {
+      conditions.push(`NOT (${cond})`);
     }
 
     return {
@@ -468,6 +486,9 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       conditions.push("toDate(loaded_at) >= toDate({addedSince:String})");
     }
 
+    const includeGroups: string[][] = [];
+    const excludeGroups: string[][] = [];
+
     for (let i = 0; i < subdomainFilters.length; i++) {
       const filter = subdomainFilters[i];
       const paramKey = `term_${i}`;
@@ -479,16 +500,37 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       );
       const normalized = normalizeSearchTerm(filter.term);
 
-      conditions.push(filter.include ? condition : `NOT (${condition})`);
-
+      const group: string[] = [condition];
       if (normalized.includes(".")) {
         const parentKey = `parent_domain_${i}`;
         params[parentKey] = normalized;
-        conditions.push(`apex_domain = {${parentKey}:String}`);
+        group.push(`apex_domain = {${parentKey}:String}`);
+      }
+
+      if (filter.include) {
+        includeGroups.push(group);
+      } else {
+        excludeGroups.push(group);
       }
     }
 
+    if (includeGroups.length > 0) {
+      const orParts = includeGroups.map(
+        g => g.length === 1 ? g[0] : `(${g.join("\n          AND ")})`,
+      );
+      conditions.push(
+        orParts.length === 1 ? orParts[0] : `(${orParts.join("\n          OR ")})`,
+      );
+    }
+    for (const group of excludeGroups) {
+      const expr = group.length === 1 ? group[0] : `(${group.join("\n          AND ")})`;
+      conditions.push(`NOT (${expr})`);
+    }
+
     if (domainFilters && domainFilters.length > 0) {
+      const domInclude: string[] = [];
+      const domExclude: string[] = [];
+
       for (let i = 0; i < domainFilters.length; i++) {
         const filter = domainFilters[i];
         const paramKey = `dom_term_${i}`;
@@ -498,7 +540,22 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           paramKey,
           params,
         );
-        conditions.push(filter.include ? condition : `NOT (${condition})`);
+        if (filter.include) {
+          domInclude.push(condition);
+        } else {
+          domExclude.push(condition);
+        }
+      }
+
+      if (domInclude.length > 0) {
+        conditions.push(
+          domInclude.length === 1
+            ? domInclude[0]
+            : `(${domInclude.join("\n          OR ")})`,
+        );
+      }
+      for (const cond of domExclude) {
+        conditions.push(`NOT (${cond})`);
       }
     }
 
