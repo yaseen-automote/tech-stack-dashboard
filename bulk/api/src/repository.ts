@@ -455,11 +455,18 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
   private buildHostnameServingSubdomainQuery(
     subdomainFilters: SubdomainFilter[],
     domainFilters?: SubdomainFilter[],
+    addedSince?: string,
   ): { query: string; params: Record<string, unknown> } {
     const params: Record<string, unknown> = {};
     const conditions: string[] = [];
 
     conditions.push("is_functional != 0");
+
+    const addedSinceMonth = normalizeAddedSinceMonth(addedSince);
+    if (addedSinceMonth) {
+      params.addedSince = addedSinceMonth;
+      conditions.push("toDate(loaded_at) >= toDate({addedSince:String})");
+    }
 
     for (let i = 0; i < subdomainFilters.length; i++) {
       const filter = subdomainFilters[i];
@@ -555,7 +562,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         offset,
       };
     } else if (params.scope === "subdomains") {
-      const subdomainResult = this.buildHostnameServingSubdomainQuery(subdomainActiveFilters);
+      const subdomainResult = this.buildHostnameServingSubdomainQuery(subdomainActiveFilters, undefined, params.addedSince);
       query = `
       ${subdomainResult.query}
       ORDER BY hostname ASC
@@ -571,6 +578,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       const combinedResult = this.buildHostnameServingSubdomainQuery(
         subdomainActiveFilters,
         domainActiveFilters,
+        params.addedSince,
       );
       query = `
         ${combinedResult.query}
@@ -591,6 +599,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       const subdomainResult = this.buildHostnameServingSubdomainQuery(
         subFilters,
         subdomainActiveFilters.length > 0 ? domainActiveFilters : undefined,
+        params.addedSince,
       );
 
       const halfLimit = Math.ceil(limit / 2);
