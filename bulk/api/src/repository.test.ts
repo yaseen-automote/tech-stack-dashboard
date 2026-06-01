@@ -182,13 +182,7 @@ describe("ClickHouseBulkApiRepository", () => {
       /CREATE TABLE IF NOT EXISTS bulk_reverse_ip_lookup[\s\S]*ORDER BY \(load_version, ip_address, hostname\)/,
     );
     expect(servingSchema).toMatch(
-      /CREATE TABLE IF NOT EXISTS bulk_subdomain_lookup[\s\S]*ORDER BY \(load_version, apex_domain, hostname\)/,
-    );
-    expect(servingSchema).toMatch(
       /CREATE VIEW IF NOT EXISTS bulk_active_reverse_ip_lookup[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = lookup\.load_version/,
-    );
-    expect(servingSchema).toMatch(
-      /CREATE VIEW IF NOT EXISTS bulk_active_subdomain_lookup[\s\S]*state\.state_key = 'hostname_serving'[\s\S]*state\.load_version = lookup\.load_version/,
     );
   });
 
@@ -309,13 +303,61 @@ describe("ClickHouseBulkApiRepository", () => {
     ]);
   });
 
-  it("queries the active subdomain serving view with modular predicates", async () => {
+  it("queries apex domains from the split apex lookup table", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "example.com",
+          apex_domain: "example.com",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    const result = await repository.lookupSubdomains({
+      scope: "domains",
+      filters: [
+        {
+          id: "filter-1",
+          term: "example",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      addedSince: "2026-04-15T00:00:00.000Z",
+      includeInactive: false,
+      limit: 50,
+      offset: 30,
+    });
+
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup AS lookup");
+    expect(client.calls[0]?.query).not.toContain("UNION ALL");
+    expect(client.calls[0]?.query).not.toContain("tech_stack_bulk.domain_liveness_status");
+    expect(client.calls[0]?.query).toContain("toDate(lookup.updated_at) >= toDate({addedSince:String})");
+    expect(client.calls[0]?.query).toContain("lookup.domain AS hostname");
+    expect(client.calls[0]?.query).toContain("lookup.domain AS apex_domain");
+    expect(client.calls[0]?.query).toContain("lookup.search_text LIKE {term_0:String}");
+    expect(client.calls[0]?.query).toContain("lookup.is_functional != 0");
+    expect(client.calls[0]?.query_params).toEqual({
+      addedSince: "2026-04-15",
+      term_0: "%example%",
+      limit: 50,
+      offset: 30,
+    });
+    expect(result).toEqual([
+      {
+        hostname: "example.com",
+        apexDomain: "example.com",
+      },
+    ]);
+  });
+
+  it("queries subdomains from the split subdomain lookup table with parent-domain optimization", async () => {
     const client = new MockClickHouseClient([
       [
         {
           hostname: "api.example.com",
           apex_domain: "example.com",
-          snapshot_month: "2026-04",
         },
       ],
     ]);
@@ -323,58 +365,47 @@ describe("ClickHouseBulkApiRepository", () => {
 
     const result = await repository.lookupSubdomains({
       scope: "subdomains",
-      domainTerm: "example*",
-      domainModifier: "starts_with",
-      subdomainTerm: "*api",
-      subdomainModifier: "ends_with",
-      limit: 50,
+      filters: [
+        {
+          id: "filter-1",
+          term: "example.com",
+          modifier: "ends",
+          include: true,
+        },
+        {
+          id: "filter-2",
+          term: "staging",
+          modifier: "contains",
+          include: false,
+        },
+      ],
+      includeInactive: true,
+      limit: Number.NaN,
+      offset: 2000,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM bulk_active_subdomain_lookup");
-    expect(client.calls[0]?.query).toContain("hostname != apex_domain");
-    expect(client.calls[0]?.query).toContain("apex_domain LIKE {domain_term: String}");
-    expect(client.calls[0]?.query).toContain("hostname LIKE {subdomain_term: String}");
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2 AS lookup");
+    expect(client.calls[0]?.query).not.toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup");
+    expect(client.calls[0]?.query).toContain("lookup.hostname AS hostname");
+    expect(client.calls[0]?.query).toContain("lookup.parent_domain AS apex_domain");
+    expect(client.calls[0]?.query).toContain("lookup.hostname_reversed LIKE {term_0:String}");
+    expect(client.calls[0]?.query).toContain("lookup.parent_domain = {parent_domain_0:String}");
+    expect(client.calls[0]?.query).toContain("NOT (lookup.search_text LIKE {term_1:String})");
+    expect(client.calls[0]?.query).not.toContain("tech_stack_bulk.domain_liveness_status");
+    expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
     expect(client.calls[0]?.query_params).toEqual({
-      domain_term: "example%",
-      subdomain_term: "%api",
-      limit: 50,
+      term_0: "moc.elpmaxe%",
+      parent_domain_0: "example.com",
+      term_1: "%staging%",
+      limit: 10000,
+      offset: 2000,
     });
     expect(result).toEqual([
       {
         hostname: "api.example.com",
         apexDomain: "example.com",
-        snapshotMonth: "2026-04",
       },
     ]);
-  });
-
-  it("applies a safe fallback limit for active subdomain searches", async () => {
-    const client = new MockClickHouseClient([
-      [
-        {
-          hostname: "api.example.com",
-          apex_domain: "example.com",
-          snapshot_month: "2026-04",
-        },
-      ],
-    ]);
-    const repository = new ClickHouseBulkApiRepository({ client });
-
-    await repository.lookupSubdomains({
-      scope: "domains",
-      domainTerm: "",
-      domainModifier: "contains",
-      subdomainTerm: "portal",
-      subdomainModifier: "contains",
-      limit: Number.NaN,
-    });
-
-    expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
-    expect(client.calls[0]?.query_params).toEqual({
-      subdomain_term: "%portal%",
-      limit: 100,
-    });
-    expect(client.calls[0]?.query).toContain("hostname = apex_domain");
   });
 
   it("rejects unbounded subdomain searches before querying ClickHouse", async () => {
@@ -384,12 +415,22 @@ describe("ClickHouseBulkApiRepository", () => {
     await expect(
       repository.lookupSubdomains({
         scope: "both",
-        domainTerm: "*",
-        domainModifier: "contains",
-        subdomainTerm: "   ",
-        subdomainModifier: "contains",
+        filters: [
+          {
+            id: "filter-1",
+            term: "*",
+            modifier: "contains",
+            include: true,
+          },
+          {
+            id: "filter-2",
+            term: "   ",
+            modifier: "contains",
+            include: true,
+          },
+        ],
       }),
-    ).rejects.toThrow("Enter at least one domain or subdomain search term to inspect subdomain infrastructure.");
+    ).rejects.toThrow("Enter at least one search term to inspect subdomain infrastructure.");
     expect(client.calls).toHaveLength(0);
   });
 
@@ -400,12 +441,170 @@ describe("ClickHouseBulkApiRepository", () => {
     await expect(
       repository.lookupSubdomains({
         scope: "both",
-        domainTerm: "exa_mple",
-        domainModifier: "contains",
+        filters: [
+          {
+            id: "filter-1",
+            term: "exa_mple",
+            modifier: "contains",
+            include: true,
+          },
+        ],
         limit: 100,
       }),
     ).rejects.toThrow("Use * as the only wildcard in domain and subdomain search terms.");
     expect(client.calls).toHaveLength(0);
+  });
+
+  it("rejects malformed addedSince dates before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.lookupSubdomains({
+        scope: "domains",
+        filters: [
+          {
+            id: "filter-1",
+            term: "example",
+            modifier: "contains",
+            include: true,
+          },
+        ],
+        addedSince: "not-a-date",
+      }),
+    ).rejects.toThrow("Enter a valid addedSince date to filter discovery results.");
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("rejects invalid calendar addedSince dates before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.lookupSubdomains({
+        scope: "domains",
+        filters: [
+          {
+            id: "filter-1",
+            term: "example",
+            modifier: "contains",
+            include: true,
+          },
+        ],
+        addedSince: "2026-02-31",
+      }),
+    ).rejects.toThrow("Enter a valid addedSince date to filter discovery results.");
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it("preserves the stated month for timestamp-form addedSince values", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "example.com",
+          apex_domain: "example.com",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await repository.lookupSubdomains({
+      scope: "domains",
+      filters: [
+        {
+          id: "filter-1",
+          term: "example",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      addedSince: "2026-03-01T00:30:00+14:00",
+    });
+
+    expect(client.calls[0]?.query_params).toEqual({
+      addedSince: "2026-03-01",
+      term_0: "%example%",
+      limit: 10000,
+      offset: 0,
+    });
+  });
+
+  it("queries both scopes with a union across the split lookup tables", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "api.example.com",
+          apex_domain: "example.com",
+        },
+        {
+          hostname: "example.com",
+          apex_domain: "example.com",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    const result = await repository.lookupSubdomains({
+      scope: "both",
+      filters: [
+        {
+          id: "filter-1",
+          term: "example.com",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      includeInactive: false,
+      limit: 25,
+      offset: 10,
+    });
+
+    expect(client.calls[0]?.query).toContain("UNION ALL");
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup AS lookup");
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2 AS lookup");
+    expect(client.calls[0]?.query).toContain("lookup.domain AS hostname");
+    expect(client.calls[0]?.query).toContain("lookup.domain AS apex_domain");
+    expect(client.calls[0]?.query).toContain("lookup.hostname AS hostname");
+    expect(client.calls[0]?.query).toContain("lookup.parent_domain = {parent_domain_0:String}");
+    expect(client.calls[0]?.query).toContain("ORDER BY hostname ASC");
+    expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
+    expect(client.calls[0]?.query).toContain("OFFSET {offset: UInt64}");
+    expect(client.calls[0]?.query_params).toEqual({
+      term_0: "%example.com%",
+      parent_domain_0: "example.com",
+      limit: 25,
+      offset: 10,
+    });
+    expect(result).toEqual([
+      {
+        hostname: "api.example.com",
+        apexDomain: "example.com",
+      },
+      {
+        hostname: "example.com",
+        apexDomain: "example.com",
+      },
+    ]);
+  });
+
+  it("checks domain existence from the split lookup tables", async () => {
+    const client = new MockClickHouseClient([[{ count: "2" }]]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    const result = await repository.checkDomainExists("example.com");
+
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup");
+    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2");
+    expect(client.calls[0]?.query).toContain("UNION ALL");
+    expect(client.calls[0]?.query).toContain("domain = {domain:String}");
+    expect(client.calls[0]?.query).toContain("parent_domain = {domain:String}");
+    expect(client.calls[0]?.query_params).toEqual({
+      domain: "example.com",
+    });
+    expect(result).toEqual({
+      exists: true,
+      hostnameCount: 2,
+    });
   });
 
   it("queries cname source hostnames for the requested cname target", async () => {
@@ -444,6 +643,94 @@ describe("ClickHouseBulkApiRepository", () => {
         snapshotMonth: "2026-04",
       },
     ]);
+  });
+
+  it("ignores invalid reverse-ip limits before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "mail.example.com",
+          snapshot_month: "2026-04",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await repository.lookupReverseIp({
+      ip: "203.0.113.10",
+      limit: Number.NaN,
+    });
+
+    expect(client.calls[0]?.query).not.toContain("LIMIT {limit: UInt64}");
+    expect(client.calls[0]?.query_params).toEqual({
+      ip_address: "203.0.113.10",
+    });
+  });
+
+  it("ignores invalid cname lookup limits before querying ClickHouse", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          hostname: "api.example.com",
+          snapshot_month: "2026-04",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await repository.lookupCnameSources({
+      domain: "edge.example.net",
+      limit: Number.NaN,
+    });
+
+    expect(client.calls[0]?.query).not.toContain("LIMIT {limit: UInt64}");
+    expect(client.calls[0]?.query_params).toEqual({
+      cname_target: "edge.example.net",
+    });
+  });
+
+  it("normalizes invalid connected-domain limits and counts distinct multi-ip results", async () => {
+    const client = new MockClickHouseClient([
+      [
+        { ip_address: "203.0.113.10" },
+        { ip_address: "203.0.113.11" },
+      ],
+      [
+        {
+          hostname: "api.example.com",
+          snapshot_month: "2026-04",
+        },
+      ],
+      [{ total_count: "1" }],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    const result = await repository.lookupConnectedDomains({
+      domain: "example.com",
+      limit: Number.NaN,
+    });
+
+    expect(client.calls[1]?.query).toContain("SELECT DISTINCT hostname, snapshot_month");
+    expect(client.calls[1]?.query_params).toEqual({
+      ip_0: "203.0.113.10",
+      ip_1: "203.0.113.11",
+      limit: 500,
+    });
+    expect(client.calls[2]?.query).toContain("SELECT count() AS total_count");
+    expect(client.calls[2]?.query).toContain("SELECT DISTINCT hostname, snapshot_month");
+    expect(client.calls[2]?.query_params).toEqual({
+      ip_0: "203.0.113.10",
+      ip_1: "203.0.113.11",
+    });
+    expect(result).toEqual({
+      results: [
+        {
+          hostname: "api.example.com",
+          snapshotMonth: "2026-04",
+        },
+      ],
+      total: 1,
+    });
   });
 
   it("builds infrastructure summary data from the active hostname serving view", async () => {
@@ -585,12 +872,13 @@ describe("ClickHouseBulkApiRepository", () => {
     const client = new MockClickHouseClient([
       [
         {
-          entry_id: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+          entry_id_text: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
           watch_type: "brand",
           term: "openai",
           enabled: 1,
           created_at: "2026-05-18 06:00:00",
           updated_at: "2026-05-18 07:00:00",
+          created_by: "admin",
         },
       ],
     ]);
@@ -598,18 +886,19 @@ describe("ClickHouseBulkApiRepository", () => {
 
     await expect(repository.listCtWatchlistEntries()).resolves.toEqual([
       {
-        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
         watchType: "brand",
         term: "openai",
         enabled: true,
         createdAt: "2026-05-18 06:00:00",
         updatedAt: "2026-05-18 07:00:00",
+        createdBy: "admin",
       },
     ]);
     expect(client.calls[0]?.query).toContain("FROM ct_watchlist_entry FINAL");
   });
 
-  it("creates CT watchlist entries with generated ids", async () => {
+  it("creates CT watchlist entries with generated ids and ownership metadata", async () => {
     const client = new MockClickHouseClient([]);
     const repository = new ClickHouseBulkApiRepository({ client });
 
@@ -617,17 +906,46 @@ describe("ClickHouseBulkApiRepository", () => {
       watchType: "brand",
       term: "openai",
       enabled: true,
+      createdBy: "admin",
     });
 
     expect(result.watchType).toBe("brand");
     expect(result.term).toBe("openai");
     expect(result.enabled).toBe(true);
+    expect(result.createdBy).toBe("admin");
     expect(client.inserts).toHaveLength(1);
     expect(client.inserts[0]?.table).toBe("ct_watchlist_entry");
     expect(client.inserts[0]?.values[0]).toMatchObject({
       watch_type: "brand",
       term: "openai",
       enabled: true,
+      created_by: "admin",
     });
+    expect(client.inserts[0]?.values[0]?.created_at).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/,
+    );
+  });
+
+  it("deletes owned CT watchlist entries after looking them up by UUID", async () => {
+    const client = new MockClickHouseClient([
+      [
+        {
+          entry_id_text: "14ffb093-26ce-4b8f-b5b8-e4bd65ffbb9b",
+          watch_type: "keyword",
+          term: "codex-verify",
+          enabled: 1,
+          created_by: "admin",
+          created_at: "2026-05-26 06:59:40.216",
+          updated_at: "2026-05-26 06:59:40.216",
+        },
+      ],
+    ]);
+    const repository = new ClickHouseBulkApiRepository({ client });
+
+    await expect(
+      repository.deleteCtWatchlistEntry("14ffb093-26ce-4b8f-b5b8-e4bd65ffbb9b", "admin"),
+    ).resolves.toBe(true);
+    expect(client.calls[0]?.query).toContain("AS entry_id_text");
+    expect(client.commands[1]?.query).toContain("DELETE WHERE entry_id = toUUID");
   });
 });
