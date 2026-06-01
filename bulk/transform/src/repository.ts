@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ClickHouseClient } from "@clickhouse/client";
+import { MULTI_LABEL_TLDS, parseAndSplitDomain } from "../../../lib/domain-splitter";
 
 import type {
   BulkTransformRepository,
@@ -11,31 +12,42 @@ import type {
 
 const ACTIVE_STATE_KEY = "hostname_serving";
 const DEFAULT_FAILED_ROW_COUNT = 0;
-
-const MULTI_LABEL_TLDS = [
-  "ac.uk",
-  "co.in",
-  "co.jp",
-  "co.uk",
-  "com.au",
-  "com.br",
-  "com.mx",
-  "gov.uk",
-  "net.au",
-  "org.au",
-  "org.uk",
-] as const;
+const DEFAULT_LOOKUP_INSERT_BATCH_SIZE = 5_000;
 
 const HOSTNAME_PATTERN =
   "^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$";
 const IPV4_PATTERN =
   "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$";
 
-type ClickHouseClientLike = Pick<ClickHouseClient, "command" | "query">;
+type ClickHouseClientLike = Pick<ClickHouseClient, "command" | "insert" | "query">;
 
 type ClickHouseBulkTransformRepositoryOptions = {
   client: ClickHouseClientLike;
   schemaPath?: string;
+  lookupInsertBatchSize?: number;
+};
+
+type ServingHostnameLookupRow = {
+  hostname: string;
+  snapshot_month: string;
+};
+
+type ApexLookupInsertRow = {
+  domain: string;
+  domain_normalized: string;
+  domain_reversed: string;
+  search_text: string;
+};
+
+type SubdomainLookupInsertRow = {
+  subdomain: string;
+  subdomain_normalized: string;
+  parent_domain: string;
+  parent_domain_normalized: string;
+  hostname: string;
+  hostname_normalized: string;
+  hostname_reversed: string;
+  search_text: string;
 };
 
 const DEFAULT_SCHEMA_PATH = path.resolve(
@@ -48,6 +60,16 @@ function splitSqlStatements(sqlText: string) {
     .split(";")
     .map((statement) => statement.trim())
     .filter((statement) => statement.length > 0);
+}
+
+function chunkRows<T>(rows: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < rows.length; index += size) {
+    chunks.push(rows.slice(index, index + size));
+  }
+
+  return chunks;
 }
 
 function parseRequiredNumber(value: unknown, fieldName: string) {
@@ -171,21 +193,90 @@ function buildFirstLabelExpression(hostnameExpression: string) {
   return `arrayElement(splitByChar('.', ${hostnameExpression}), 1)`;
 }
 
+function reverseLookupValue(value: string) {
+  return value.split("").reverse().join("");
+}
+
+function normalizeLookupValue(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function buildLookupInsertBuffers(rows: ServingHostnameLookupRow[]) {
+  const apexRows: ApexLookupInsertRow[] = [];
+  const subdomainRows: SubdomainLookupInsertRow[] = [];
+  const seenApexRows = new Set<string>();
+  const seenSubdomainRows = new Set<string>();
+
+  for (const row of rows) {
+    const splitResult = parseAndSplitDomain(row.hostname);
+
+    if (splitResult.type === "apex") {
+      const dedupeKey = `${row.snapshot_month}\u0000${splitResult.domain}`;
+
+      if (seenApexRows.has(dedupeKey)) {
+        continue;
+      }
+
+      seenApexRows.add(dedupeKey);
+      const normalized = normalizeLookupValue(splitResult.domain);
+
+      apexRows.push({
+        domain: splitResult.domain,
+        domain_normalized: normalized,
+        domain_reversed: reverseLookupValue(normalized),
+        search_text: normalized,
+      });
+      continue;
+    }
+
+    const dedupeKey = `${row.snapshot_month}\u0000${splitResult.parent_domain}\u0000${splitResult.subdomain}`;
+
+    if (seenSubdomainRows.has(dedupeKey)) {
+      continue;
+    }
+
+    seenSubdomainRows.add(dedupeKey);
+    const hostname = `${splitResult.subdomain}.${splitResult.parent_domain}`;
+
+    const hostnameNormalized = normalizeLookupValue(hostname);
+
+    subdomainRows.push({
+      subdomain: splitResult.subdomain,
+      subdomain_normalized: normalizeLookupValue(splitResult.subdomain),
+      parent_domain: splitResult.parent_domain,
+      parent_domain_normalized: normalizeLookupValue(splitResult.parent_domain),
+      hostname,
+      hostname_normalized: hostnameNormalized,
+      hostname_reversed: reverseLookupValue(hostnameNormalized),
+      search_text: hostnameNormalized,
+    });
+  }
+
+  return {
+    apexRows,
+    subdomainRows,
+  };
+}
+
 export function deriveDomainParts(hostname: string) {
-  const labels = hostname.split(".");
-  const firstLabel = labels[0] ?? "";
+  const splitResult = parseAndSplitDomain(hostname);
+  const apexDomain =
+    splitResult.type === "apex" ? splitResult.domain : splitResult.parent_domain;
+  const labels = apexDomain.split(".");
+  const firstLabel =
+    splitResult.type === "subdomain" ? splitResult.subdomain.split(".")[0] ?? "" : labels[0] ?? "";
   const twoLabelTld = labels.slice(-2).join(".");
 
   if (labels.length >= 3 && (MULTI_LABEL_TLDS as readonly string[]).includes(twoLabelTld)) {
     return {
-      apexDomain: labels.slice(-3).join("."),
+      apexDomain,
       tld: twoLabelTld,
       firstLabel,
     };
   }
 
   return {
-    apexDomain: labels.slice(-2).join("."),
+    apexDomain,
     tld: labels.at(-1) ?? "",
     firstLabel,
   };
@@ -262,14 +353,55 @@ function buildTransformInsertQuery() {
   `;
 }
 
+function buildSplitLookupTableStatements() {
+  return [
+    `
+      CREATE TABLE IF NOT EXISTS tech_stack_bulk.bulk_apex_domain_lookup
+      (
+        domain String,
+        domain_normalized String,
+        domain_reversed String,
+        search_text String,
+        is_functional UInt8 DEFAULT 1,
+        updated_at DateTime DEFAULT now(),
+        INDEX idx_apex_search_text search_text TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1
+      )
+      ENGINE = ReplacingMergeTree(updated_at)
+      ORDER BY domain_normalized
+    `,
+    `
+      CREATE TABLE IF NOT EXISTS tech_stack_bulk.bulk_subdomain_lookup_v2
+      (
+        subdomain String,
+        subdomain_normalized String,
+        parent_domain String,
+        parent_domain_normalized String,
+        hostname String,
+        hostname_normalized String,
+        hostname_reversed String,
+        search_text String,
+        is_functional UInt8 DEFAULT 1,
+        updated_at DateTime DEFAULT now(),
+        INDEX idx_subdomain_search_text search_text TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1
+      )
+      ENGINE = ReplacingMergeTree(updated_at)
+      ORDER BY (parent_domain_normalized, hostname_normalized)
+    `,
+  ];
+}
+
 export class ClickHouseBulkTransformRepository implements BulkTransformRepository {
   private readonly client: ClickHouseClientLike;
   private readonly schemaPath: string;
+  private readonly lookupInsertBatchSize: number;
   private schemaRegistered = false;
+  private splitLookupTablesEnsured = false;
 
   constructor(options: ClickHouseBulkTransformRepositoryOptions) {
     this.client = options.client;
     this.schemaPath = options.schemaPath ?? DEFAULT_SCHEMA_PATH;
+    this.lookupInsertBatchSize =
+      options.lookupInsertBatchSize ?? DEFAULT_LOOKUP_INSERT_BATCH_SIZE;
   }
 
   async ensureSchema() {
@@ -288,6 +420,7 @@ export class ClickHouseBulkTransformRepository implements BulkTransformRepositor
       });
     }
 
+    await this.ensureSplitLookupTables();
     this.schemaRegistered = true;
   }
 
@@ -358,6 +491,28 @@ export class ClickHouseBulkTransformRepository implements BulkTransformRepositor
         wait_end_of_query: 1,
       },
     });
+    const servingHostnameRows = await readRows<Record<string, unknown>>(
+      this.client,
+      `
+        SELECT
+          hostname,
+          snapshot_month
+        FROM bulk_hostname_serving
+        WHERE load_version = {load_version: String}
+      `,
+      {
+        load_version: params.loadVersion,
+      },
+    );
+    const { apexRows, subdomainRows } = buildLookupInsertBuffers(
+      servingHostnameRows.map((row) => ({
+        hostname: String(row.hostname),
+        snapshot_month: String(row.snapshot_month),
+      })),
+    );
+    await this.ensureSplitLookupTables();
+    await this.insertApexLookupRows(apexRows);
+    await this.insertSubdomainLookupRows(subdomainRows);
 
     const rowCountRows = await readRows<Record<string, unknown>>(
       this.client,
@@ -481,5 +636,58 @@ export class ClickHouseBulkTransformRepository implements BulkTransformRepositor
         wait_end_of_query: 1,
       },
     });
+  }
+
+  private async insertApexLookupRows(rows: ApexLookupInsertRow[]) {
+    for (const batch of chunkRows(rows, this.lookupInsertBatchSize)) {
+      await this.client.insert({
+        table: "tech_stack_bulk.bulk_apex_domain_lookup",
+        values: batch.map((row) => ({
+          domain: row.domain,
+          domain_normalized: row.domain_normalized,
+          domain_reversed: row.domain_reversed,
+          search_text: row.search_text,
+        })),
+        format: "JSONEachRow",
+      });
+    }
+  }
+
+  private async insertSubdomainLookupRows(
+    rows: SubdomainLookupInsertRow[],
+  ) {
+    for (const batch of chunkRows(rows, this.lookupInsertBatchSize)) {
+      await this.client.insert({
+        table: "tech_stack_bulk.bulk_subdomain_lookup_v2",
+        values: batch.map((row) => ({
+          subdomain: row.subdomain,
+          subdomain_normalized: row.subdomain_normalized,
+          parent_domain: row.parent_domain,
+          parent_domain_normalized: row.parent_domain_normalized,
+          hostname: row.hostname,
+          hostname_normalized: row.hostname_normalized,
+          hostname_reversed: row.hostname_reversed,
+          search_text: row.search_text,
+        })),
+        format: "JSONEachRow",
+      });
+    }
+  }
+
+  private async ensureSplitLookupTables() {
+    if (this.splitLookupTablesEnsured) {
+      return;
+    }
+
+    for (const statement of buildSplitLookupTableStatements()) {
+      await this.client.command({
+        query: statement,
+        clickhouse_settings: {
+          wait_end_of_query: 1,
+        },
+      });
+    }
+
+    this.splitLookupTablesEnsured = true;
   }
 }
