@@ -132,3 +132,34 @@ Plan disk for:
 
 Keep at least one prior successful import and transform available during
 refresh windows so rollback stays cheap.
+
+## Rebuild Split Lookup Tables
+
+If the split lookup tables (`bulk_apex_domain_lookup`,
+`bulk_subdomain_lookup_v2`) become corrupted or out of sync with the active
+serving load, you can truncate and repopulate them from the currently active
+hostname serving data.
+
+From the repo root on the server:
+
+```bash
+docker compose --env-file .env.bulk exec -T bulk-api npm run bulk:rebuild-lookups
+```
+
+Or from a host with Node installed (development):
+
+```bash
+npm run bulk:rebuild-lookups
+```
+
+The command:
+
+1. Ensures the ClickHouse schema exists (safe to run at any time).
+2. Reads the active load version from `bulk_runtime_state_current`.
+3. Truncates both split lookup tables.
+4. Reads all hostnames from `bulk_hostname_serving` for the active load
+   version.
+5. Rebuilds the apex and subdomain lookup rows using the same split-and-dedupe
+   logic as the serving transform.
+6. Inserts the rebuilt rows into both lookup tables.
+7. Logs the inserted row counts.

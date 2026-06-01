@@ -590,6 +590,64 @@ export class ClickHouseBulkTransformRepository implements BulkTransformRepositor
     });
   }
 
+  async findActiveLoadVersion(): Promise<{ loadVersion: string; snapshotMonth: string } | null> {
+    const rows = await readRows<Record<string, unknown>>(
+      this.client,
+      `
+        SELECT load_version, snapshot_month
+        FROM bulk_runtime_state_current
+        WHERE state_key = 'hostname_serving'
+        LIMIT 1
+      `,
+    );
+
+    const row = rows[0];
+    return row
+      ? {
+          loadVersion: String(row.load_version),
+          snapshotMonth: String(row.snapshot_month),
+        }
+      : null;
+  }
+
+  async truncateSplitLookupTables() {
+    await this.client.command({
+      query: "TRUNCATE TABLE tech_stack_bulk.bulk_apex_domain_lookup",
+      clickhouse_settings: { wait_end_of_query: 1 },
+    });
+    await this.client.command({
+      query: "TRUNCATE TABLE tech_stack_bulk.bulk_subdomain_lookup_v2",
+      clickhouse_settings: { wait_end_of_query: 1 },
+    });
+  }
+
+  async rebuildSplitLookupTablesForLoad(params: { loadVersion: string; snapshotMonth: string }) {
+    const servingHostnameRows = await readRows<Record<string, unknown>>(
+      this.client,
+      `
+        SELECT hostname, snapshot_month
+        FROM bulk_hostname_serving
+        WHERE load_version = {load_version: String}
+      `,
+      { load_version: params.loadVersion },
+    );
+
+    const { apexRows, subdomainRows } = buildLookupInsertBuffers(
+      servingHostnameRows.map((row) => ({
+        hostname: String(row.hostname),
+        snapshot_month: String(row.snapshot_month),
+      })),
+    );
+
+    await this.insertApexLookupRows(apexRows);
+    await this.insertSubdomainLookupRows(subdomainRows);
+
+    return {
+      apexCount: apexRows.length,
+      subdomainCount: subdomainRows.length,
+    };
+  }
+
   private async writeTransformAttemptEvent(params: {
     loadVersion: string;
     importVersion: string;
