@@ -303,7 +303,7 @@ describe("ClickHouseBulkApiRepository", () => {
     ]);
   });
 
-  it("queries apex domains from the split apex lookup table", async () => {
+  it("queries apex domains from the active hostname serving view", async () => {
     const client = new MockClickHouseClient([
       [
         {
@@ -330,14 +330,14 @@ describe("ClickHouseBulkApiRepository", () => {
       offset: 30,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup AS lookup");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("SELECT DISTINCT");
     expect(client.calls[0]?.query).not.toContain("UNION ALL");
-    expect(client.calls[0]?.query).not.toContain("tech_stack_bulk.domain_liveness_status");
-    expect(client.calls[0]?.query).toContain("toDate(lookup.updated_at) >= toDate({addedSince:String})");
-    expect(client.calls[0]?.query).toContain("lookup.domain AS hostname");
-    expect(client.calls[0]?.query).toContain("lookup.domain AS apex_domain");
-    expect(client.calls[0]?.query).toContain("lookup.search_text LIKE {term_0:String}");
-    expect(client.calls[0]?.query).toContain("lookup.is_functional != 0");
+    expect(client.calls[0]?.query).toContain("toDate(loaded_at) >= toDate({addedSince:String})");
+    expect(client.calls[0]?.query).toContain("apex_domain AS hostname");
+    expect(client.calls[0]?.query).toContain("apex_domain AS apex_domain");
+    expect(client.calls[0]?.query).toContain("apex_domain LIKE {term_0:String}");
+    expect(client.calls[0]?.query).toContain("is_functional != 0");
     expect(client.calls[0]?.query_params).toEqual({
       addedSince: "2026-04-15",
       term_0: "%example%",
@@ -352,7 +352,7 @@ describe("ClickHouseBulkApiRepository", () => {
     ]);
   });
 
-  it("queries subdomains from the split subdomain lookup table with parent-domain optimization", async () => {
+  it("queries subdomains from the active hostname serving view with parent-domain optimization", async () => {
     const client = new MockClickHouseClient([
       [
         {
@@ -384,17 +384,18 @@ describe("ClickHouseBulkApiRepository", () => {
       offset: 2000,
     });
 
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2 AS lookup");
-    expect(client.calls[0]?.query).not.toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup");
-    expect(client.calls[0]?.query).toContain("lookup.hostname AS hostname");
-    expect(client.calls[0]?.query).toContain("lookup.parent_domain AS apex_domain");
-    expect(client.calls[0]?.query).toContain("lookup.hostname_reversed LIKE {term_0:String}");
-    expect(client.calls[0]?.query).toContain("lookup.parent_domain = {parent_domain_0:String}");
-    expect(client.calls[0]?.query).toContain("NOT (lookup.search_text LIKE {term_1:String})");
-    expect(client.calls[0]?.query).not.toContain("tech_stack_bulk.domain_liveness_status");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("SELECT DISTINCT");
+    expect(client.calls[0]?.query).toContain("hostname");
+    expect(client.calls[0]?.query).toContain("apex_domain");
+    expect(client.calls[0]?.query).not.toContain("lookup.hostname");
+    expect(client.calls[0]?.query).not.toContain("lookup.parent_domain");
+    expect(client.calls[0]?.query).toContain("hostname LIKE {term_0:String}");
+    expect(client.calls[0]?.query).toContain("apex_domain = {parent_domain_0:String}");
+    expect(client.calls[0]?.query).toContain("NOT (hostname LIKE {term_1:String})");
     expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
     expect(client.calls[0]?.query_params).toEqual({
-      term_0: "moc.elpmaxe%",
+      term_0: "%example.com",
       parent_domain_0: "example.com",
       term_1: "%staging%",
       limit: 10000,
@@ -529,15 +530,17 @@ describe("ClickHouseBulkApiRepository", () => {
     });
   });
 
-  it("queries both scopes with a union across the split lookup tables", async () => {
+  it("queries both scopes with separate queries merged in code", async () => {
     const client = new MockClickHouseClient([
       [
         {
-          hostname: "api.example.com",
+          hostname: "example.com",
           apex_domain: "example.com",
         },
+      ],
+      [
         {
-          hostname: "example.com",
+          hostname: "api.example.com",
           apex_domain: "example.com",
         },
       ],
@@ -554,50 +557,62 @@ describe("ClickHouseBulkApiRepository", () => {
           include: true,
         },
       ],
-      includeInactive: false,
       limit: 25,
-      offset: 10,
+      offset: 0,
     });
 
-    expect(client.calls[0]?.query).toContain("UNION ALL");
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup AS lookup");
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2 AS lookup");
-    expect(client.calls[0]?.query).toContain("lookup.domain AS hostname");
-    expect(client.calls[0]?.query).toContain("lookup.domain AS apex_domain");
-    expect(client.calls[0]?.query).toContain("lookup.hostname AS hostname");
-    expect(client.calls[0]?.query).toContain("lookup.parent_domain = {parent_domain_0:String}");
+    expect(client.calls).toHaveLength(2);
+
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("apex_domain AS hostname");
+    expect(client.calls[0]?.query).toContain("apex_domain AS apex_domain");
+    expect(client.calls[0]?.query).toContain("apex_term_0");
     expect(client.calls[0]?.query).toContain("ORDER BY hostname ASC");
-    expect(client.calls[0]?.query).toContain("LIMIT {limit: UInt64}");
-    expect(client.calls[0]?.query).toContain("OFFSET {offset: UInt64}");
+    expect(client.calls[0]?.query).toContain("LIMIT {apex_limit: UInt64}");
+    expect(client.calls[0]?.query).not.toContain("UNION ALL");
+    expect(client.calls[0]?.query).not.toContain("OFFSET");
     expect(client.calls[0]?.query_params).toEqual({
+      apex_term_0: "example.com",
+      apex_limit: 13,
+    });
+
+    expect(client.calls[1]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[1]?.query).toContain("SELECT DISTINCT\n          hostname");
+    expect(client.calls[1]?.query).toContain("apex_domain");
+    expect(client.calls[1]?.query).toContain("hostname LIKE {term_0:String}");
+    expect(client.calls[1]?.query).toContain("apex_domain = {parent_domain_0:String}");
+    expect(client.calls[1]?.query).toContain("ORDER BY hostname ASC");
+    expect(client.calls[1]?.query).toContain("LIMIT {sub_limit: UInt64}");
+    expect(client.calls[1]?.query).not.toContain("UNION ALL");
+    expect(client.calls[1]?.query).not.toContain("OFFSET");
+    expect(client.calls[1]?.query_params).toEqual({
       term_0: "%example.com%",
       parent_domain_0: "example.com",
-      limit: 25,
-      offset: 10,
+      sub_limit: 12,
     });
+
     expect(result).toEqual([
       {
-        hostname: "api.example.com",
+        hostname: "example.com",
         apexDomain: "example.com",
       },
       {
-        hostname: "example.com",
+        hostname: "api.example.com",
         apexDomain: "example.com",
       },
     ]);
   });
 
-  it("checks domain existence from the split lookup tables", async () => {
+  it("checks domain existence from the active hostname serving view", async () => {
     const client = new MockClickHouseClient([[{ count: "2" }]]);
     const repository = new ClickHouseBulkApiRepository({ client });
 
     const result = await repository.checkDomainExists("example.com");
 
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_apex_domain_lookup");
-    expect(client.calls[0]?.query).toContain("FROM tech_stack_bulk.bulk_subdomain_lookup_v2");
-    expect(client.calls[0]?.query).toContain("UNION ALL");
-    expect(client.calls[0]?.query).toContain("domain = {domain:String}");
-    expect(client.calls[0]?.query).toContain("parent_domain = {domain:String}");
+    expect(client.calls[0]?.query).toContain("FROM bulk_active_hostname_serving");
+    expect(client.calls[0]?.query).toContain("count(DISTINCT hostname)");
+    expect(client.calls[0]?.query).toContain("apex_domain = {domain:String}");
+    expect(client.calls[0]?.query).not.toContain("UNION ALL");
     expect(client.calls[0]?.query_params).toEqual({
       domain: "example.com",
     });
@@ -806,6 +821,7 @@ describe("ClickHouseBulkApiRepository", () => {
         phishing: 5,
         brandProtection: 4,
         shadowIt: 3,
+        typosquatting: 0,
         highSeverity: 7,
       },
     });
@@ -876,6 +892,7 @@ describe("ClickHouseBulkApiRepository", () => {
           watch_type: "brand",
           term: "openai",
           enabled: 1,
+          typos: 0,
           created_at: "2026-05-18 06:00:00",
           updated_at: "2026-05-18 07:00:00",
           created_by: "admin",
@@ -890,6 +907,7 @@ describe("ClickHouseBulkApiRepository", () => {
         watchType: "brand",
         term: "openai",
         enabled: true,
+        typos: false,
         createdAt: "2026-05-18 06:00:00",
         updatedAt: "2026-05-18 07:00:00",
         createdBy: "admin",
@@ -906,12 +924,14 @@ describe("ClickHouseBulkApiRepository", () => {
       watchType: "brand",
       term: "openai",
       enabled: true,
+      typos: true,
       createdBy: "admin",
     });
 
     expect(result.watchType).toBe("brand");
     expect(result.term).toBe("openai");
     expect(result.enabled).toBe(true);
+    expect(result.typos).toBe(true);
     expect(result.createdBy).toBe("admin");
     expect(client.inserts).toHaveLength(1);
     expect(client.inserts[0]?.table).toBe("ct_watchlist_entry");
@@ -919,6 +939,7 @@ describe("ClickHouseBulkApiRepository", () => {
       watch_type: "brand",
       term: "openai",
       enabled: true,
+      typos: true,
       created_by: "admin",
     });
     expect(client.inserts[0]?.values[0]?.created_at).toMatch(
@@ -934,6 +955,7 @@ describe("ClickHouseBulkApiRepository", () => {
           watch_type: "keyword",
           term: "codex-verify",
           enabled: 1,
+          typos: 0,
           created_by: "admin",
           created_at: "2026-05-26 06:59:40.216",
           updated_at: "2026-05-26 06:59:40.216",

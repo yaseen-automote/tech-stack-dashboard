@@ -18,6 +18,9 @@ import type {
   BulkApiRepository,
   BulkHostnameRow,
   BulkInfrastructureSummary,
+  CtIngestionSummaryRow,
+  SubdomainFilter,
+  SubdomainLookupParams,
 } from "./repository";
 
 type FetchLike = typeof fetch;
@@ -25,6 +28,7 @@ type FetchLike = typeof fetch;
 type SourceKind = "bulk" | "upstream";
 type SubdomainSearchScope = "domains" | "subdomains" | "both";
 type SubdomainSearchModifier = "starts_with" | "ends_with" | "contains";
+type SubdomainSearchInclusion = "included" | "excluded";
 const INVALID_SUBDOMAIN_WILDCARD_ERROR =
   "Use * as the only wildcard in domain and subdomain search terms.";
 
@@ -43,10 +47,22 @@ export type BulkSubdomainLookupResponse = {
   results: SubdomainRecord[];
 } & LookupMetadata;
 
+export type BulkConnectedDomainsResponse = {
+  domain: string;
+  results: SubdomainRecord[];
+  total: number;
+} & LookupMetadata;
+
 export type BulkCnameLookupResponse = {
   domain: string;
   results: SubdomainRecord[];
 } & LookupMetadata;
+
+export type BulkDomainExistsResponse = {
+  domain: string;
+  exists: boolean;
+  hostnameCount: number;
+};
 
 export type BulkInfrastructureSummaryResponse = {
   domain: string;
@@ -74,28 +90,37 @@ export type BulkCtWatchlistResponse = {
   source: SourceKind;
 };
 
+export type BulkCtIngestionSummaryResponse = {
+  results: CtIngestionSummaryRow[];
+  source: SourceKind;
+};
+
 export type BulkCtWatchlistMutationResponse = {
   entry: CtWatchlistEntry;
   source: SourceKind;
 };
 
 export interface BulkApiLookupService {
-  lookupReverseIp(params: { ip: string; limit: number }): Promise<BulkReverseIpLookupResponse>;
-  lookupSubdomains(
-    params: {
-      scope: SubdomainSearchScope;
-      domainTerm?: string;
-      domainModifier?: SubdomainSearchModifier;
-      subdomainTerm?: string;
-      subdomainModifier?: SubdomainSearchModifier;
-      limit?: number;
-    },
-  ): Promise<BulkSubdomainLookupResponse>;
+  lookupReverseIp(params: { ip: string; includeInactive?: boolean; limit: number }): Promise<BulkReverseIpLookupResponse>;
+  lookupSubdomains(params: {
+    scope: SubdomainSearchScope;
+    filters: SubdomainFilter[];
+    domainFilters?: SubdomainFilter[];
+    subdomainFilters?: SubdomainFilter[];
+    addedSince?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<BulkSubdomainLookupResponse>;
+  lookupConnectedDomains(params: { domain: string; limit?: number }): Promise<BulkConnectedDomainsResponse>;
   lookupCnames(params: { domain: string; limit?: number }): Promise<BulkCnameLookupResponse>;
   lookupInfrastructureSummary(
     params: { domain: string },
   ): Promise<BulkInfrastructureSummaryResponse>;
-  lookupCtAlertSummary(): Promise<BulkCtAlertSummaryResponse>;
+  lookupCtAlertSummary(params?: {
+    category?: CtAlertCategory;
+    severity?: CtAlertSeverity;
+    watchType?: CtWatchType;
+  }): Promise<BulkCtAlertSummaryResponse>;
   lookupCtAlerts(params: {
     limit: number;
     offset: number;
@@ -104,19 +129,32 @@ export interface BulkApiLookupService {
     watchType?: CtWatchType;
     dumpDate?: string;
   }): Promise<BulkCtAlertFeedResponse>;
-  listCtWatchlistEntries(): Promise<BulkCtWatchlistResponse>;
+  exportCtAlerts(params: {
+    limit: number;
+    category?: CtAlertCategory;
+    severity?: CtAlertSeverity;
+    watchType?: CtWatchType;
+    dumpDate?: string;
+  }): Promise<BulkCtAlertFeedRow[]>;
+  lookupCtIngestionSummary(): Promise<BulkCtIngestionSummaryResponse>;
+  listCtWatchlistEntries(actor?: string): Promise<BulkCtWatchlistResponse>;
   createCtWatchlistEntry(params: {
     watchType: CtWatchType;
     term: string;
     enabled: boolean;
+    typos: boolean;
+    actor: string;
   }): Promise<BulkCtWatchlistMutationResponse>;
   updateCtWatchlistEntry(params: {
     entryId: string;
     watchType?: CtWatchType;
     term?: string;
     enabled?: boolean;
+    typos?: boolean;
+    actor: string;
   }): Promise<BulkCtWatchlistMutationResponse | null>;
-  deleteCtWatchlistEntry(entryId: string): Promise<boolean>;
+  deleteCtWatchlistEntry(entryId: string, actor: string): Promise<boolean>;
+  checkDomainExists(domain: string): Promise<BulkDomainExistsResponse>;
 }
 
 type BulkApiLookupServiceOptions = {
@@ -162,6 +200,13 @@ function uniqueHostnames(rows: BulkHostnameRow[]) {
 
 function firstSnapshotMonth(rows: BulkHostnameRow[]) {
   return rows.find((row) => row.snapshotMonth)?.snapshotMonth;
+}
+
+function withWatchlistPermissions(entry: CtWatchlistEntry, actor: string): CtWatchlistEntry {
+  return {
+    ...entry,
+    canManage: true,
+  };
 }
 
 function buildSubdomainResults(rows: BulkHostnameRow[]) {
@@ -267,8 +312,8 @@ export function createBulkApiLookupService(
   options: BulkApiLookupServiceOptions,
 ): BulkApiLookupService {
   return {
-    async lookupReverseIp({ ip, limit }) {
-      const rows = await options.repository.lookupReverseIp({ ip, limit });
+    async lookupReverseIp({ ip, includeInactive, limit }) {
+      const rows = await options.repository.lookupReverseIp({ ip, includeInactive, limit });
 
       return {
         domain: ip,
@@ -280,32 +325,39 @@ export function createBulkApiLookupService(
 
     async lookupSubdomains({
       scope,
-      domainTerm,
-      domainModifier,
-      subdomainTerm,
-      subdomainModifier,
+      filters,
+      domainFilters,
+      subdomainFilters,
+      addedSince,
       limit,
+      offset,
     }) {
-      if (
-        hasUnsupportedSubdomainWildcard(domainTerm) ||
-        hasUnsupportedSubdomainWildcard(subdomainTerm)
-      ) {
-        throw new Error(INVALID_SUBDOMAIN_WILDCARD_ERROR);
-      }
-
       const rows = await options.repository.lookupSubdomains({
         scope,
-        domainTerm,
-        domainModifier,
-        subdomainTerm,
-        subdomainModifier,
+        filters,
+        domainFilters,
+        subdomainFilters,
+        addedSince,
         limit,
+        offset,
       });
 
       return {
         domain: "Domains & Subdomains Discovery",
         results: buildSubdomainResults(rows),
         snapshotMonth: firstSnapshotMonth(rows) ?? options.config.activeSnapshotMonth,
+        source: "bulk",
+      };
+    },
+
+    async lookupConnectedDomains({ domain, limit }) {
+      const response = await options.repository.lookupConnectedDomains({ domain, limit });
+
+      return {
+        domain,
+        results: buildSubdomainResults(response.results),
+        total: response.total,
+        snapshotMonth: firstSnapshotMonth(response.results) ?? options.config.activeSnapshotMonth,
         source: "bulk",
       };
     },
@@ -344,8 +396,12 @@ export function createBulkApiLookupService(
       };
     },
 
-    async lookupCtAlertSummary() {
-      const summary = await options.repository.lookupCtAlertSummary();
+    async lookupCtAlertSummary(params?: {
+      category?: CtAlertCategory;
+      severity?: CtAlertSeverity;
+      watchType?: CtWatchType;
+    }) {
+      const summary = await options.repository.lookupCtAlertSummary(params);
 
       return {
         ...summary,
@@ -374,30 +430,56 @@ export function createBulkApiLookupService(
       };
     },
 
-    async listCtWatchlistEntries() {
+    async exportCtAlerts({ limit, category, severity, watchType, dumpDate }) {
+      return options.repository.exportCtAlerts({
+        limit,
+        category,
+        severity,
+        watchType,
+        dumpDate,
+      });
+    },
+
+    async lookupCtIngestionSummary() {
       return {
-        entries: await options.repository.listCtWatchlistEntries(),
+        results: await options.repository.lookupCtIngestionSummary(),
         source: "bulk",
       };
     },
 
-    async createCtWatchlistEntry({ watchType, term, enabled }) {
+    async listCtWatchlistEntries(actor = "") {
       return {
-        entry: await options.repository.createCtWatchlistEntry({
-          watchType,
-          term: normalizeWatchTerm(term),
-          enabled,
-        }),
+        entries: (await options.repository.listCtWatchlistEntries()).map((entry) =>
+          withWatchlistPermissions(entry, actor),
+        ),
         source: "bulk",
       };
     },
 
-    async updateCtWatchlistEntry({ entryId, watchType, term, enabled }) {
+    async createCtWatchlistEntry({ watchType, term, enabled, typos, actor }) {
+      return {
+        entry: withWatchlistPermissions(
+          await options.repository.createCtWatchlistEntry({
+            watchType,
+            term: normalizeWatchTerm(term),
+            enabled,
+            typos,
+            createdBy: actor,
+          }),
+          actor,
+        ),
+        source: "bulk",
+      };
+    },
+
+    async updateCtWatchlistEntry({ entryId, watchType, term, enabled, typos, actor }) {
       const entry = await options.repository.updateCtWatchlistEntry({
         entryId,
         watchType,
         term: typeof term === "string" ? normalizeWatchTerm(term) : undefined,
         enabled,
+        typos,
+        actor,
       });
 
       if (!entry) {
@@ -405,13 +487,22 @@ export function createBulkApiLookupService(
       }
 
       return {
-        entry,
+        entry: withWatchlistPermissions(entry, actor),
         source: "bulk",
       };
     },
 
-    async deleteCtWatchlistEntry(entryId) {
-      return options.repository.deleteCtWatchlistEntry(entryId);
+    async deleteCtWatchlistEntry(entryId, actor) {
+      return options.repository.deleteCtWatchlistEntry(entryId, actor);
+    },
+
+    async checkDomainExists(domain) {
+      const result = await options.repository.checkDomainExists(domain);
+      return {
+        domain,
+        exists: result.exists,
+        hostnameCount: result.hostnameCount,
+      };
     },
   };
 }

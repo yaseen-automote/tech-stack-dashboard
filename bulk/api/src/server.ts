@@ -8,10 +8,11 @@ import { createBulkApiLookupService } from "./service";
 
 const config = readBulkConfig();
 const clickhouseClient = createClient({
-  host: `http://${config.clickhouse.host}:${config.clickhouse.port}`,
+  url: `http://${config.clickhouse.host}:${config.clickhouse.port}`,
   database: config.clickhouse.database,
   username: config.clickhouse.user,
   password: config.clickhouse.password,
+  request_timeout: 120_000,
 });
 const repository = new ClickHouseBulkApiRepository({
   client: clickhouseClient,

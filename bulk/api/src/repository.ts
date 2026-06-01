@@ -94,7 +94,7 @@ export type CtIngestionSummaryRow = {
 
 type CtAlertLookupOptions = {
   limit: number;
-  offset: number;
+  offset?: number;
   category?: CtAlertCategory;
   severity?: CtAlertSeverity;
   watchType?: CtWatchType;
@@ -105,6 +105,7 @@ type CtWatchlistCreateInput = {
   watchType: CtWatchType;
   term: string;
   enabled: boolean;
+  typos: boolean;
   createdBy: string;
 };
 
@@ -113,6 +114,7 @@ type CtWatchlistUpdateInput = {
   watchType?: CtWatchType;
   term?: string;
   enabled?: boolean;
+  typos?: boolean;
   actor: string;
 };
 
@@ -141,6 +143,7 @@ export interface BulkApiRepository {
     watchType?: CtWatchType;
   }): Promise<CtAlertSummary>;
   lookupCtAlerts(params: CtAlertLookupOptions): Promise<BulkCtAlertFeed>;
+  exportCtAlerts(params: CtAlertLookupOptions): Promise<BulkCtAlertFeedRow[]>;
   lookupCtIngestionSummary(): Promise<CtIngestionSummaryRow[]>;
   listCtWatchlistEntries(): Promise<CtWatchlistEntry[]>;
   createCtWatchlistEntry(params: CtWatchlistCreateInput): Promise<CtWatchlistEntry>;
@@ -341,6 +344,34 @@ function buildLookupCondition(
   }
 }
 
+function buildHostnameServingLookupCondition(
+  column: string,
+  filter: SubdomainFilter,
+  paramKey: string,
+  params: Record<string, unknown>,
+) {
+  const normalized = normalizeSearchTerm(filter.term);
+
+  switch (filter.modifier) {
+    case "exact":
+      params[paramKey] = normalized;
+      return `${column} = {${paramKey}:String}`;
+    case "starts":
+      params[paramKey] = `${normalized}%`;
+      return `${column} LIKE {${paramKey}:String}`;
+    case "ends":
+      params[paramKey] = `%${normalized}`;
+      return `${column} LIKE {${paramKey}:String}`;
+    case "contains":
+      if (normalized.includes(".") && column === "apex_domain") {
+        params[paramKey] = normalized;
+        return `${column} = {${paramKey}:String}`;
+      }
+      params[paramKey] = `%${normalized}%`;
+      return `${column} LIKE {${paramKey}:String}`;
+  }
+}
+
 export class ClickHouseBulkApiRepository implements BulkApiRepository {
   private readonly client: ClickHouseClientLike;
   private watchlistColumnsEnsured = false;
@@ -381,28 +412,28 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
     }));
   }
 
-  private buildApexQuery(
+  private buildHostnameServingApexQuery(
     domainFilters: SubdomainFilter[],
     addedSince?: string,
+    paramPrefix?: string,
   ): { query: string; params: Record<string, unknown> } {
     const params: Record<string, unknown> = {};
     const conditions: string[] = [];
+    const prefix = paramPrefix ?? "";
 
-    conditions.push("lookup.is_functional != 0");
+    conditions.push("is_functional != 0");
 
     const addedSinceMonth = normalizeAddedSinceMonth(addedSince);
     if (addedSinceMonth) {
       params.addedSince = addedSinceMonth;
-      conditions.push("toDate(lookup.updated_at) >= toDate({addedSince:String})");
+      conditions.push("toDate(loaded_at) >= toDate({addedSince:String})");
     }
 
     for (let i = 0; i < domainFilters.length; i++) {
       const filter = domainFilters[i];
-      const paramKey = `term_${i}`;
-      const condition = buildLookupCondition(
-        "lookup.domain",
-        "lookup.domain_reversed",
-        "lookup.search_text",
+      const paramKey = `${prefix}term_${i}`;
+      const condition = buildHostnameServingLookupCondition(
+        "apex_domain",
         filter,
         paramKey,
         params,
@@ -412,30 +443,29 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
 
     return {
       query: `
-        SELECT
-          lookup.domain AS hostname,
-          lookup.domain AS apex_domain
-        FROM tech_stack_bulk.bulk_apex_domain_lookup AS lookup
+        SELECT DISTINCT
+          apex_domain AS hostname,
+          apex_domain AS apex_domain
+        FROM bulk_active_hostname_serving
         WHERE ${conditions.join("\n        AND ")}`,
       params,
     };
   }
 
-  private buildSubdomainQuery(
+  private buildHostnameServingSubdomainQuery(
     subdomainFilters: SubdomainFilter[],
+    domainFilters?: SubdomainFilter[],
   ): { query: string; params: Record<string, unknown> } {
     const params: Record<string, unknown> = {};
     const conditions: string[] = [];
 
-    conditions.push("lookup.is_functional != 0");
+    conditions.push("is_functional != 0");
 
     for (let i = 0; i < subdomainFilters.length; i++) {
       const filter = subdomainFilters[i];
       const paramKey = `term_${i}`;
-      const condition = buildLookupCondition(
-        "lookup.hostname",
-        "lookup.hostname_reversed",
-        "lookup.search_text",
+      const condition = buildHostnameServingLookupCondition(
+        "hostname",
         filter,
         paramKey,
         params,
@@ -447,16 +477,30 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       if (normalized.includes(".")) {
         const parentKey = `parent_domain_${i}`;
         params[parentKey] = normalized;
-        conditions.push(`lookup.parent_domain = {${parentKey}:String}`);
+        conditions.push(`apex_domain = {${parentKey}:String}`);
+      }
+    }
+
+    if (domainFilters && domainFilters.length > 0) {
+      for (let i = 0; i < domainFilters.length; i++) {
+        const filter = domainFilters[i];
+        const paramKey = `dom_term_${i}`;
+        const condition = buildHostnameServingLookupCondition(
+          "apex_domain",
+          filter,
+          paramKey,
+          params,
+        );
+        conditions.push(filter.include ? condition : `NOT (${condition})`);
       }
     }
 
     return {
       query: `
-        SELECT
-          lookup.hostname AS hostname,
-          lookup.parent_domain AS apex_domain
-        FROM tech_stack_bulk.bulk_subdomain_lookup_v2 AS lookup
+        SELECT DISTINCT
+          hostname,
+          apex_domain
+        FROM bulk_active_hostname_serving
         WHERE ${conditions.join("\n        AND ")}`,
       params,
     };
@@ -498,7 +542,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
     let queryParams: Record<string, unknown>;
 
     if (params.scope === "domains") {
-      const apexResult = this.buildApexQuery(domainActiveFilters, params.addedSince);
+      const apexResult = this.buildHostnameServingApexQuery(domainActiveFilters, params.addedSince);
       query = `
       ${apexResult.query}
       ORDER BY hostname ASC
@@ -511,7 +555,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         offset,
       };
     } else if (params.scope === "subdomains") {
-      const subdomainResult = this.buildSubdomainQuery(subdomainActiveFilters);
+      const subdomainResult = this.buildHostnameServingSubdomainQuery(subdomainActiveFilters);
       query = `
       ${subdomainResult.query}
       ORDER BY hostname ASC
@@ -523,28 +567,87 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
         limit,
         offset,
       };
+    } else if (subdomainActiveFilters.length > 0 && domainActiveFilters.length > 0) {
+      const combinedResult = this.buildHostnameServingSubdomainQuery(
+        subdomainActiveFilters,
+        domainActiveFilters,
+      );
+      query = `
+        ${combinedResult.query}
+        ORDER BY hostname ASC
+        LIMIT {limit: UInt64}
+        OFFSET {offset: UInt64}
+      `;
+      queryParams = {
+        ...combinedResult.params,
+        limit,
+        offset,
+      };
     } else {
       const subFilters = subdomainActiveFilters.length > 0
         ? subdomainActiveFilters
         : domainActiveFilters;
-      const apexResult = this.buildApexQuery(domainActiveFilters, params.addedSince);
-      const subdomainResult = this.buildSubdomainQuery(subFilters);
-      query = `
-      SELECT * FROM (
-        ${apexResult.query}
-        UNION ALL
-        ${subdomainResult.query}
-      )
-      ORDER BY hostname ASC
-      LIMIT {limit: UInt64}
-      OFFSET {offset: UInt64}
-    `;
-      queryParams = {
-        ...apexResult.params,
-        ...subdomainResult.params,
-        limit,
-        offset,
-      };
+      const apexResult = this.buildHostnameServingApexQuery(domainActiveFilters, params.addedSince, "apex_");
+      const subdomainResult = this.buildHostnameServingSubdomainQuery(
+        subFilters,
+        subdomainActiveFilters.length > 0 ? domainActiveFilters : undefined,
+      );
+
+      const halfLimit = Math.ceil(limit / 2);
+      const restLimit = limit - halfLimit;
+
+      const apexQuery = `${apexResult.query}\n        ORDER BY hostname ASC\n        LIMIT {apex_limit: UInt64}`;
+      const subdomainQuery = `${subdomainResult.query}\n        ORDER BY hostname ASC\n        LIMIT {sub_limit: UInt64}`;
+
+      const [apexRows, subdomainRows] = await Promise.all([
+        readRows<Record<string, unknown>>(this.client, {
+          query: apexQuery,
+          queryParams: { ...apexResult.params, apex_limit: halfLimit + offset },
+        }),
+        readRows<Record<string, unknown>>(this.client, {
+          query: subdomainQuery,
+          queryParams: { ...subdomainResult.params, sub_limit: restLimit + offset },
+        }),
+      ]);
+
+      const seen = new Set<string>();
+      const dedupedApex: BulkHostnameRow[] = [];
+      const dedupedSub: BulkHostnameRow[] = [];
+
+      for (const row of apexRows) {
+        const hostname = String(row.hostname).trim().toLowerCase();
+
+        if (!hostname || seen.has(hostname)) {
+          continue;
+        }
+
+        seen.add(hostname);
+        dedupedApex.push({
+          hostname,
+          apexDomain: typeof row.apex_domain === "string" ? row.apex_domain : undefined,
+          snapshotMonth: normalizeSnapshotMonth(row.snapshot_month),
+        });
+      }
+
+      for (const row of subdomainRows) {
+        const hostname = String(row.hostname).trim().toLowerCase();
+
+        if (!hostname || seen.has(hostname)) {
+          continue;
+        }
+
+        seen.add(hostname);
+        dedupedSub.push({
+          hostname,
+          apexDomain: typeof row.apex_domain === "string" ? row.apex_domain : undefined,
+          snapshotMonth: normalizeSnapshotMonth(row.snapshot_month),
+        });
+      }
+
+      return [
+        ...dedupedApex.slice(offset, offset + halfLimit),
+        ...dedupedSub.slice(offset, offset + restLimit),
+      ];
     }
 
     const rows = await readRows<Record<string, unknown>>(this.client, {
@@ -808,6 +911,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           countIf(category = 'phishing') AS phishing_count,
           countIf(category = 'brand-protection') AS brand_protection_count,
           countIf(category = 'shadow-it') AS shadow_it_count,
+          countIf(category = 'typosquatting') AS typosquatting_count,
           countIf(severity = 'high') AS high_severity_count
         FROM ct_active_alert_feed
         ${whereClause}
@@ -834,6 +938,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           "brand_protection_count",
         ),
         shadowIt: parseRequiredNumber(row?.shadow_it_count ?? 0, "shadow_it_count"),
+        typosquatting: parseRequiredNumber(row?.typosquatting_count ?? 0, "typosquatting_count"),
         highSeverity: parseRequiredNumber(
           row?.high_severity_count ?? 0,
           "high_severity_count",
@@ -854,7 +959,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       filters.length > 0 ? `WHERE ${filters.join("\n          AND ")}` : "";
     const queryParams = {
       limit: params.limit,
-      offset: params.offset,
+      offset: params.offset ?? 0,
       ...(params.category ? { category: params.category } : {}),
       ...(params.severity ? { severity: params.severity } : {}),
       ...(params.watchType ? { watch_type: params.watchType } : {}),
@@ -916,6 +1021,60 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
     };
   }
 
+  async exportCtAlerts(params: CtAlertLookupOptions): Promise<BulkCtAlertFeedRow[]> {
+    const filters = [
+      params.category ? "category = {category: String}" : null,
+      params.severity ? "severity = {severity: String}" : null,
+      params.watchType ? "watch_type = {watch_type: String}" : null,
+      params.dumpDate ? "dump_date = {dump_date: Date}" : null,
+    ].filter((value): value is string => Boolean(value));
+
+    const whereClause =
+      filters.length > 0 ? `WHERE ${filters.join("\n          AND ")}` : "";
+    const queryParams = {
+      limit: Math.min(params.limit, 5000),
+      ...(params.category ? { category: params.category } : {}),
+      ...(params.severity ? { severity: params.severity } : {}),
+      ...(params.watchType ? { watch_type: params.watchType } : {}),
+      ...(params.dumpDate ? { dump_date: params.dumpDate } : {}),
+    };
+
+    const rows = await readRows<Record<string, unknown>>(this.client, {
+      query: `
+        SELECT
+          alert_id,
+          toString(dump_date) AS dump_date,
+          domain,
+          category,
+          severity,
+          watch_type,
+          matched_term,
+          reasons,
+          issuer_name
+        FROM ct_active_alert_feed
+        ${whereClause}
+        ORDER BY dump_date DESC, severity ASC, domain ASC, alert_id ASC
+        LIMIT {limit: UInt64}
+      `,
+      queryParams,
+    });
+
+    return rows.map((row) => ({
+      id: String(row.alert_id),
+      observedAt: String(row.dump_date),
+      domain: String(row.domain),
+      category: String(row.category) as CtAlertCategory,
+      severity: String(row.severity) as CtAlertSeverity,
+      watchType: String(row.watch_type) as CtWatchType,
+      matchedTerm: String(row.matched_term),
+      reasons: Array.isArray(row.reasons) ? row.reasons.map(String) : [],
+      issuerName:
+        typeof row.issuer_name === "string" && row.issuer_name.length > 0
+          ? row.issuer_name
+          : null,
+    }));
+  }
+
   async lookupCtIngestionSummary(): Promise<CtIngestionSummaryRow[]> {
     const rows = await readRows<Record<string, unknown>>(this.client, {
       query: `
@@ -972,6 +1131,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           watch_type,
           term,
           enabled,
+          typos,
           created_by,
           toString(created_at) AS created_at,
           toString(updated_at) AS updated_at
@@ -985,6 +1145,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       watchType: String(row.watch_type) as CtWatchType,
       term: String(row.term),
       enabled: normalizeBoolean(row.enabled),
+      typos: normalizeBoolean(row.typos),
       createdBy: typeof row.created_by === "string" ? row.created_by : null,
       createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
       updatedAt: typeof row.updated_at === "string" ? row.updated_at : undefined,
@@ -1005,6 +1166,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           watch_type: params.watchType,
           term: params.term,
           enabled: params.enabled,
+          typos: params.typos,
           created_by: params.createdBy,
           created_at: now,
           updated_at: now,
@@ -1018,6 +1180,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       watchType: params.watchType,
       term: params.term,
       enabled: params.enabled,
+      typos: params.typos,
       createdBy: params.createdBy,
       createdAt: now,
       updatedAt: now,
@@ -1039,6 +1202,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       watchType: params.watchType ?? currentEntry.watchType,
       term: params.term ?? currentEntry.term,
       enabled: params.enabled ?? currentEntry.enabled,
+      typos: params.typos ?? currentEntry.typos,
       createdBy: currentEntry.createdBy ?? params.actor,
       createdAt: normalizeRecordedAtForClickHouse(currentEntry.createdAt ?? updatedAt),
       updatedAt,
@@ -1052,6 +1216,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           watch_type: nextEntry.watchType,
           term: nextEntry.term,
           enabled: nextEntry.enabled,
+          typos: nextEntry.typos,
           created_by: nextEntry.createdBy,
           created_at: nextEntry.createdAt,
           updated_at: nextEntry.updatedAt,
@@ -1098,6 +1263,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
           watch_type,
           term,
           enabled,
+          typos,
           created_by,
           toString(created_at) AS created_at,
           toString(updated_at) AS updated_at
@@ -1121,6 +1287,7 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
       watchType: String(row.watch_type) as CtWatchType,
       term: String(row.term),
       enabled: normalizeBoolean(row.enabled),
+      typos: normalizeBoolean(row.typos),
       createdBy: typeof row.created_by === "string" ? row.created_by : null,
       createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
       updatedAt: typeof row.updated_at === "string" ? row.updated_at : undefined,
@@ -1130,16 +1297,9 @@ export class ClickHouseBulkApiRepository implements BulkApiRepository {
   async checkDomainExists(domain: string): Promise<{ exists: boolean; hostnameCount: number }> {
     const rows = await readRows<Record<string, unknown>>(this.client, {
       query: `
-        SELECT count() AS count
-        FROM (
-          SELECT domain
-          FROM tech_stack_bulk.bulk_apex_domain_lookup
-          WHERE domain = {domain:String}
-          UNION ALL
-          SELECT parent_domain AS domain
-          FROM tech_stack_bulk.bulk_subdomain_lookup_v2
-          WHERE parent_domain = {domain:String}
-        )
+        SELECT count(DISTINCT hostname) AS count
+        FROM bulk_active_hostname_serving
+        WHERE apex_domain = {domain:String}
       `,
       queryParams: {
         domain,

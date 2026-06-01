@@ -101,8 +101,14 @@ describe("createBulkApiLookupService", () => {
 
     const response = await service.lookupSubdomains({
       scope: "both",
-      domainTerm: "example",
-      domainModifier: "contains",
+      filters: [
+        {
+          id: "filter-1",
+          term: "example",
+          modifier: "contains",
+          include: true,
+        },
+      ],
       limit: 10,
     });
 
@@ -133,29 +139,58 @@ describe("createBulkApiLookupService", () => {
     });
     expect(repository.lookupSubdomains).toHaveBeenCalledWith({
       scope: "both",
-      domainTerm: "example",
-      domainModifier: "contains",
+      filters: [
+        {
+          id: "filter-1",
+          term: "example",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      addedSince: undefined,
+      includeInactive: undefined,
       limit: 10,
+      offset: undefined,
     });
   });
 
-  it("rejects raw SQL wildcard characters consistently before hitting the repository", async () => {
+  it("passes wildcard-containing filters through to the repository unchanged", async () => {
     const repository = buildRepository();
+    vi.mocked(repository.lookupSubdomains).mockResolvedValue([]);
     const service = createBulkApiLookupService({
       config: buildConfig(),
       repository,
       fetch: vi.fn(),
     });
 
-    await expect(
-      service.lookupSubdomains({
-        scope: "both",
-        domainTerm: "exa%mple",
-        domainModifier: "contains",
-        limit: 100,
-      }),
-    ).rejects.toThrow("Use * as the only wildcard in domain and subdomain search terms.");
-    expect(repository.lookupSubdomains).not.toHaveBeenCalled();
+    await service.lookupSubdomains({
+      scope: "both",
+      filters: [
+        {
+          id: "filter-1",
+          term: "exa%mple",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      limit: 100,
+    });
+
+    expect(repository.lookupSubdomains).toHaveBeenCalledWith({
+      scope: "both",
+      filters: [
+        {
+          id: "filter-1",
+          term: "exa%mple",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      addedSince: undefined,
+      includeInactive: undefined,
+      limit: 100,
+      offset: undefined,
+    });
   });
 
   it("uses bulk cname rows that point at the requested cname target", async () => {
@@ -402,12 +437,13 @@ describe("createBulkApiLookupService", () => {
   it("normalizes CT watchlist terms before creating entries", async () => {
     const repository = buildRepository();
     vi.mocked(repository.createCtWatchlistEntry).mockResolvedValue({
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       watchType: "brand",
       term: "openai",
       enabled: true,
       createdAt: "2026-05-18T06:00:00.000Z",
       updatedAt: "2026-05-18T06:00:00.000Z",
+      createdBy: "admin",
     });
     const service = createBulkApiLookupService({
       config: buildConfig(),
@@ -419,21 +455,25 @@ describe("createBulkApiLookupService", () => {
       watchType: "brand",
       term: " OpenAI ",
       enabled: true,
+      actor: "admin",
     });
 
     expect(repository.createCtWatchlistEntry).toHaveBeenCalledWith({
       watchType: "brand",
       term: "openai",
       enabled: true,
+      createdBy: "admin",
     });
     expect(response).toEqual({
       entry: {
-        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
         watchType: "brand",
         term: "openai",
         enabled: true,
         createdAt: "2026-05-18T06:00:00.000Z",
         updatedAt: "2026-05-18T06:00:00.000Z",
+        createdBy: "admin",
+        canManage: true,
       },
       source: "bulk",
     });
@@ -442,12 +482,13 @@ describe("createBulkApiLookupService", () => {
   it("normalizes CT watchlist terms before updating entries", async () => {
     const repository = buildRepository();
     vi.mocked(repository.updateCtWatchlistEntry).mockResolvedValue({
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       watchType: "brand",
       term: "chatgpt",
       enabled: false,
       createdAt: "2026-05-18T06:00:00.000Z",
       updatedAt: "2026-05-18T07:00:00.000Z",
+      createdBy: "admin",
     });
     const service = createBulkApiLookupService({
       config: buildConfig(),
@@ -456,24 +497,28 @@ describe("createBulkApiLookupService", () => {
     });
 
     const response = await service.updateCtWatchlistEntry({
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       term: " ChatGPT ",
       enabled: false,
+      actor: "admin",
     });
 
     expect(repository.updateCtWatchlistEntry).toHaveBeenCalledWith({
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       term: "chatgpt",
       enabled: false,
+      actor: "admin",
     });
     expect(response).toEqual({
       entry: {
-        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
         watchType: "brand",
         term: "chatgpt",
         enabled: false,
         createdAt: "2026-05-18T06:00:00.000Z",
         updatedAt: "2026-05-18T07:00:00.000Z",
+        createdBy: "admin",
+        canManage: true,
       },
       source: "bulk",
     });
@@ -489,10 +534,11 @@ describe("createBulkApiLookupService", () => {
     });
 
     await expect(
-      service.deleteCtWatchlistEntry("3f8ea328-7f4f-4476-9ad4-a80b426fd444"),
+      service.deleteCtWatchlistEntry("3f8ea328-7f4f-4476-9ad4-a80b426fd444", "admin"),
     ).resolves.toBe(true);
     expect(repository.deleteCtWatchlistEntry).toHaveBeenCalledWith(
       "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      "admin",
     );
   });
 });

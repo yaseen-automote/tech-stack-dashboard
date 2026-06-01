@@ -7,10 +7,13 @@ import type { BulkApiConfig } from "./config";
 import type {
   BulkCtAlertFeedResponse,
   BulkCtAlertSummaryResponse,
+  BulkCtIngestionSummaryResponse,
   BulkCtWatchlistMutationResponse,
   BulkCtWatchlistResponse,
   BulkApiLookupService,
   BulkCnameLookupResponse,
+  BulkConnectedDomainsResponse,
+  BulkDomainExistsResponse,
   BulkInfrastructureSummaryResponse,
   BulkReverseIpLookupResponse,
   BulkSubdomainLookupResponse,
@@ -43,16 +46,19 @@ function buildLookupService(): BulkApiLookupService {
   return {
     lookupReverseIp: vi.fn<() => Promise<BulkReverseIpLookupResponse>>(),
     lookupSubdomains: vi.fn<() => Promise<BulkSubdomainLookupResponse>>(),
+    lookupConnectedDomains: vi.fn<() => Promise<BulkConnectedDomainsResponse>>(),
     lookupCnames: vi.fn<() => Promise<BulkCnameLookupResponse>>(),
     lookupInfrastructureSummary: vi.fn<() => Promise<BulkInfrastructureSummaryResponse>>(),
     lookupCtAlertSummary: vi.fn<() => Promise<BulkCtAlertSummaryResponse>>(),
     lookupCtAlerts: vi.fn<() => Promise<BulkCtAlertFeedResponse>>(),
+    lookupCtIngestionSummary: vi.fn<() => Promise<BulkCtIngestionSummaryResponse>>(),
     listCtWatchlistEntries: vi.fn<() => Promise<BulkCtWatchlistResponse>>(),
     createCtWatchlistEntry: vi.fn<() => Promise<BulkCtWatchlistMutationResponse>>(),
     updateCtWatchlistEntry: vi.fn<
       () => Promise<BulkCtWatchlistMutationResponse | null>
     >(),
     deleteCtWatchlistEntry: vi.fn<() => Promise<boolean>>(),
+    checkDomainExists: vi.fn<() => Promise<BulkDomainExistsResponse>>(),
   };
 }
 
@@ -118,6 +124,7 @@ describe("createBulkApiApp", () => {
 
     expect(lookupService.lookupReverseIp).toHaveBeenCalledWith({
       ip: "142.251.43.46",
+      includeInactive: false,
       limit: 25,
     });
     expect(response.status).toBe(200);
@@ -159,16 +166,46 @@ describe("createBulkApiApp", () => {
 
     const response = await request(
       app,
-      "/v1/subdomains?scope=both&domainTerm=EXAMPLE*&domainModifier=starts_with&subdomainTerm=api&subdomainModifier=contains&limit=bogus",
+      '/v1/subdomains?scope=both&filters=' +
+        encodeURIComponent(
+          JSON.stringify([
+            {
+              id: "filter-1",
+              term: "EXAMPLE*",
+              modifier: "starts",
+              include: true,
+            },
+            {
+              id: "filter-2",
+              term: "api",
+              modifier: "contains",
+              include: true,
+            },
+          ]),
+        ) +
+        "&limit=bogus",
     );
 
     expect(lookupService.lookupSubdomains).toHaveBeenCalledWith({
       scope: "both",
-      domainTerm: "example*",
-      domainModifier: "starts_with",
-      subdomainTerm: "api",
-      subdomainModifier: "contains",
-      limit: 100,
+      filters: [
+        {
+          id: "filter-1",
+          term: "EXAMPLE*",
+          modifier: "starts",
+          include: true,
+        },
+        {
+          id: "filter-2",
+          term: "api",
+          modifier: "contains",
+          include: true,
+        },
+      ],
+      addedSince: undefined,
+      includeInactive: false,
+      limit: 25,
+      offset: 0,
     });
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
@@ -202,22 +239,19 @@ describe("createBulkApiApp", () => {
     });
   });
 
-  it("rejects invalid domain modifiers before invoking the lookup service", async () => {
+  it("rejects subdomain requests without filters before invoking the lookup service", async () => {
     const lookupService = buildLookupService();
     const app = createBulkApiApp({
       config: buildConfig(),
       lookupService,
     });
 
-    const response = await request(
-      app,
-      "/v1/subdomains?scope=domains&domainTerm=example&domainModifier=equals",
-    );
+    const response = await request(app, "/v1/subdomains?scope=domains");
 
     expect(response.status).toBe(400);
     expect(lookupService.lookupSubdomains).not.toHaveBeenCalled();
     await expect(response.json()).resolves.toEqual({
-      error: "Select a valid domain search modifier.",
+      error: "Enter at least one domain or subdomain search term to inspect subdomain infrastructure.",
     });
   });
 
@@ -230,7 +264,17 @@ describe("createBulkApiApp", () => {
 
     const response = await request(
       app,
-      "/v1/subdomains?scope=both&subdomainTerm=api_internal&subdomainModifier=contains",
+      '/v1/subdomains?scope=both&filters=' +
+        encodeURIComponent(
+          JSON.stringify([
+            {
+              id: "filter-1",
+              term: "api_internal",
+              modifier: "contains",
+              include: true,
+            },
+          ]),
+        ),
     );
 
     expect(response.status).toBe(400);
@@ -446,16 +490,55 @@ describe("createBulkApiApp", () => {
     });
   });
 
+  it("returns CT ingestion summary", async () => {
+    const lookupService = buildLookupService();
+    vi.mocked(lookupService.lookupCtIngestionSummary).mockResolvedValue({
+      results: [
+        {
+          dumpDate: "2026-05-18",
+          status: "completed",
+          rowCount: 12345,
+          ingestedAt: "2026-05-18 12:34:56",
+          errorMessage: null,
+        },
+      ],
+      source: "bulk",
+    });
+    const app = createBulkApiApp({
+      config: buildConfig(),
+      lookupService,
+    });
+
+    const response = await request(app, "/v1/ct-ingestion-summary");
+
+    expect(response.status).toBe(200);
+    expect(lookupService.lookupCtIngestionSummary).toHaveBeenCalledTimes(1);
+    await expect(response.json()).resolves.toEqual({
+      success: true,
+      data: [
+        {
+          dumpDate: "2026-05-18",
+          status: "completed",
+          rowCount: 12345,
+          ingestedAt: "2026-05-18 12:34:56",
+          errorMessage: null,
+        },
+      ],
+    });
+  });
+
   it("creates CT watchlist entries", async () => {
     const lookupService = buildLookupService();
     vi.mocked(lookupService.createCtWatchlistEntry).mockResolvedValue({
       entry: {
-        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
         watchType: "brand",
         term: "openai",
         enabled: true,
         createdAt: "2026-05-18T06:00:00.000Z",
         updatedAt: "2026-05-18T06:00:00.000Z",
+        createdBy: "admin",
+        canManage: true,
       },
       source: "bulk",
     });
@@ -468,6 +551,7 @@ describe("createBulkApiApp", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "x-dashboard-user": "admin",
       },
       body: JSON.stringify({
         watchType: "brand",
@@ -481,19 +565,22 @@ describe("createBulkApiApp", () => {
       watchType: "brand",
       term: "OpenAI",
       enabled: true,
+      actor: "admin",
     });
   });
 
-  it("updates CT watchlist entries", async () => {
+  it("updates CT watchlist entries for UUIDv7 ids", async () => {
     const lookupService = buildLookupService();
     vi.mocked(lookupService.updateCtWatchlistEntry).mockResolvedValue({
       entry: {
-        entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+        entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
         watchType: "brand",
         term: "chatgpt",
         enabled: false,
         createdAt: "2026-05-18T06:00:00.000Z",
         updatedAt: "2026-05-18T07:00:00.000Z",
+        createdBy: "admin",
+        canManage: true,
       },
       source: "bulk",
     });
@@ -503,11 +590,12 @@ describe("createBulkApiApp", () => {
     });
 
     const response = await app.request(
-      "http://localhost/v1/ct/watchlists/3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      "http://localhost/v1/ct/watchlists/019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       {
         method: "PATCH",
         headers: {
           "content-type": "application/json",
+          "x-dashboard-user": "admin",
         },
         body: JSON.stringify({
           term: "ChatGPT",
@@ -518,13 +606,14 @@ describe("createBulkApiApp", () => {
 
     expect(response.status).toBe(200);
     expect(lookupService.updateCtWatchlistEntry).toHaveBeenCalledWith({
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       term: "ChatGPT",
       enabled: false,
+      actor: "admin",
     });
   });
 
-  it("deletes CT watchlist entries", async () => {
+  it("deletes CT watchlist entries for UUIDv7 ids", async () => {
     const lookupService = buildLookupService();
     vi.mocked(lookupService.deleteCtWatchlistEntry).mockResolvedValue(true);
     const app = createBulkApiApp({
@@ -533,19 +622,23 @@ describe("createBulkApiApp", () => {
     });
 
     const response = await app.request(
-      "http://localhost/v1/ct/watchlists/3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      "http://localhost/v1/ct/watchlists/019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
       {
         method: "DELETE",
+        headers: {
+          "x-dashboard-user": "admin",
+        },
       },
     );
 
     expect(response.status).toBe(200);
     expect(lookupService.deleteCtWatchlistEntry).toHaveBeenCalledWith(
-      "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
+      "admin",
     );
     await expect(response.json()).resolves.toEqual({
       ok: true,
-      entryId: "3f8ea328-7f4f-4476-9ad4-a80b426fd444",
+      entryId: "019e3aaf-eb6a-78ce-a523-7f4c9dfa61ff",
     });
   });
 });
